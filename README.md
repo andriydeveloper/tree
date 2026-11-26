@@ -23,7 +23,12 @@ The first start takes a few minutes. The launcher:
 1. checks this repository for a newer version and updates the app (only when online);
 2. creates its own Python environment in `.venv` and installs the missing libraries
    (`pycairo`, `PySide6-Essentials`);
-3. starts the tree without a console window. A tree that is already running is replaced.
+3. starts the tree without a console window. A tree that is already running is replaced;
+4. adds a launcher, so the next starts need no terminal:
+   - Linux: "Christmas tree" in the app menu (can be pinned to the dock) and, once, a desktop icon;
+   - Windows: once, shortcuts on the desktop and in the Start menu.
+
+   An icon you delete is not created again. When the folder moves, the menu entry follows it.
 
 Python 3.9 or newer is needed. On Windows `start.bat` tries to install it with `winget` when it is
 missing; otherwise get it from https://www.python.org/downloads/.
@@ -61,6 +66,7 @@ and push to `main`. A git clone is updated with `git pull --ff-only` instead.
 | `requirements.txt` | libraries the tree needs |
 | `VERSION` | version used by the update check |
 | `wimo-logo-blau.svg` | the logo shape |
+| `icon.svg`, `icon.ico` | launcher icon (Linux, Windows) |
 
 ## Author
 

@@ -5,6 +5,8 @@ Launcher of the Christmas tree. Uses only the standard library, so it runs on a 
 1. Online: checks GitHub for a newer version and updates the app files (settings stay).
 2. Prepares its own Python environment (.venv) and installs missing libraries.
 3. Starts the tree without a console window; a running tree is replaced.
+4. Adds a launcher icon, so later starts need no terminal: Linux - app menu entry and (once) a
+   desktop icon; Windows - (once) shortcuts on the desktop and in the Start menu.
 
   start.bat / start.sh               update, install, start
   start.bat --stop / start.sh stop   close the running tree
@@ -16,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 
@@ -26,7 +29,7 @@ REPO = "andriydeveloper/tree"
 BRANCH = "main"
 VERSION_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/VERSION"
 ZIP_URL = f"https://github.com/{REPO}/archive/refs/heads/{BRANCH}.zip"
-KEEP = {"settings.json", "tree.log", ".venv", ".git"}       # an update never replaces these
+KEEP = {"settings.json", "tree.log", ".venv", ".git", ".launcher.lock"}   # an update never replaces these
 VENV = os.path.join(APP_DIR, ".venv")
 WINDOWS = os.name == "nt"
 MIN_PYTHON = (3, 9)
@@ -79,7 +82,11 @@ def update():
             raise ValueError("unsafe path in the archive")
         root = names[0].split("/")[0]
         with tempfile.TemporaryDirectory() as tmp:
-            archive.extractall(tmp)
+            for info in archive.infolist():
+                path = archive.extract(info, tmp)
+                mode = (info.external_attr >> 16) & 0o777    # zipfile drops modes: start.sh must stay executable
+                if mode and not info.is_dir():
+                    os.chmod(path, mode)
             source = os.path.join(tmp, root)
             for name in os.listdir(source):
                 if name in KEEP:
@@ -111,6 +118,85 @@ def missing(python):
 
 def works(python):
     return not missing(python)
+
+
+def notify(message):
+    """Desktop notification, for starts without a terminal (Linux; Windows shows the console)."""
+    if not WINDOWS and shutil.which("notify-send"):
+        subprocess.call(["notify-send", "-i", os.path.join(APP_DIR, "icon.svg"), "Christmas tree", message],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def desktop_entry_text():
+    def quoted(path):                                         # Exec quoting of the desktop entry spec
+        return '"' + "".join("\\" + c if c in '"`$\\' else c for c in path) + '"'
+    return ("[Desktop Entry]\nType=Application\nName=Christmas tree\n"
+            "Comment=Animated Christmas tree in the screen corner\n"
+            f"Exec={quoted(sys.executable)} {quoted(os.path.join(APP_DIR, 'launcher.py'))}\n"
+            f"Icon={os.path.join(APP_DIR, 'icon.svg')}\n"
+            "Terminal=false\nCategories=Utility;\nStartupNotify=false\n")
+
+
+def write_if_changed(path, text, mode=0o644):
+    try:
+        with open(path) as f:
+            if f.read() == text:
+                return False
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(text)
+    os.chmod(path, mode)
+    return True
+
+
+def linux_icons():
+    text = desktop_entry_text()
+    data = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    if write_if_changed(os.path.join(data, "applications", "christmas-tree.desktop"), text):
+        log("added to the app menu: Christmas tree")             # the path follows the folder if it moves
+    marker = os.path.join(VENV, ".desktop-icon")
+    if os.path.exists(marker):                                # once only: a removed icon stays removed
+        return
+    try:
+        desktop = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True, text=True).stdout.strip()
+    except OSError:
+        desktop = ""
+    desktop = desktop or os.path.expanduser("~/Desktop")
+    if os.path.isdir(desktop):
+        icon = os.path.join(desktop, "christmas-tree.desktop")
+        write_if_changed(icon, text, 0o755)
+        if shutil.which("gio"):                               # GNOME desktop: allow launching
+            subprocess.call(["gio", "set", icon, "metadata::trusted", "true"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log(f"desktop icon: {icon}")
+    open(marker, "w").close()
+
+
+def windows_icons():
+    marker = os.path.join(VENV, ".desktop-icon")
+    if os.path.exists(marker):                                # once only: a removed shortcut stays removed
+        return
+    q = lambda path: path.replace("'", "''")                  # PowerShell single quotes
+    bat, ico = os.path.join(APP_DIR, "start.bat"), os.path.join(APP_DIR, "icon.ico")
+    script = "".join(
+        f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut([Environment]::GetFolderPath('{place}')"
+        f"+'\\Christmas tree.lnk');$s.TargetPath='{q(bat)}';$s.WorkingDirectory='{q(APP_DIR)}';"
+        f"$s.IconLocation='{q(ico)}';$s.WindowStyle=7;$s.Save();"
+        for place in ("Desktop", "Programs"))
+    code = subprocess.call(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=0x08000000)
+    if code == 0:
+        log("shortcuts added: desktop and Start menu")
+        open(marker, "w").close()
+
+
+def add_icons():
+    try:
+        windows_icons() if WINDOWS else linux_icons()
+    except Exception as e:                                    # icons are a convenience, never block the start
+        log(f"no launcher icon ({e.__class__.__name__}: {e})")
 
 
 def has_pip(python):
@@ -169,6 +255,7 @@ def environment():
         return None
     packages = missing(python)
     log(f"installing {', '.join(packages)}, the first start takes a few minutes...")
+    notify("First start: installing libraries, this takes a few minutes. The tree appears by itself.")
     code = subprocess.call([python, "-m", "pip", "install", "--disable-pip-version-check", *packages])
     if code != 0 or not works(python):
         log("could not install the libraries. Check the internet connection and start again.")
@@ -191,14 +278,47 @@ def start(python, args):
     subprocess.Popen([python, os.path.join(APP_DIR, "tree.py"), *args], **options)
 
 
+def lock():
+    """Only one launcher at a time; a lock older than 20 minutes is left over from a crash."""
+    path = os.path.join(APP_DIR, ".launcher.lock")
+    for _ in range(2):
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            return path
+        except FileExistsError:
+            try:
+                if time.time() - os.path.getmtime(path) < 20 * 60:
+                    return None
+                os.remove(path)
+            except OSError:
+                return None
+    return None
+
+
 def main():
+    path = lock()
+    if path is None:
+        log("already starting, please wait")
+        notify("Already starting, please wait.")
+        return 0
+    try:
+        return run()
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def run():
     args = [a for a in sys.argv[1:] if a not in ("--no-update", "stop", "--stop")]
     stop = "--stop" in sys.argv or "stop" in sys.argv
     if sys.version_info < MIN_PYTHON:
         log(f"Python {'.'.join(map(str, MIN_PYTHON))} or newer is needed, this is {sys.version.split()[0]}")
         return 1
     if not stop and "--no-update" not in sys.argv and update():
-        # the launcher itself may be new: run the updated one
+        # the launcher itself may be new: run the updated one (it takes the lock itself)
+        os.remove(os.path.join(APP_DIR, ".launcher.lock"))
         return subprocess.call([sys.executable, os.path.abspath(__file__), *sys.argv[1:], "--no-update"])
     python = environment()
     if python is None:
@@ -206,6 +326,7 @@ def main():
     if stop:
         return subprocess.call([python, os.path.join(APP_DIR, "tree.py"), "--stop"])
     start(python, args)
+    add_icons()
     log("started")
     return 0
 
