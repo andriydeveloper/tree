@@ -199,6 +199,30 @@ def add_icons():
         log(f"no launcher icon ({e.__class__.__name__}: {e})")
 
 
+def system_library():
+    """
+    Qt 6.5+ on X11 needs the system library libxcb-cursor0, missing on a fresh Ubuntu and not
+    installable with pip. With apt and pkexec the user is asked for the password in a dialog.
+    """
+    if WINDOWS or sys.platform == "darwin" or os.environ.get("XDG_SESSION_TYPE") == "wayland":
+        return True
+    import ctypes.util
+    if ctypes.util.find_library("xcb-cursor"):
+        return True
+    log("the system library libxcb-cursor0 is missing (Qt needs it)")
+    if shutil.which("pkexec") and shutil.which("apt-get") and os.environ.get("DISPLAY"):
+        notify("One system library is missing (libxcb-cursor0). Enter your password to install it.")
+        subprocess.call(["pkexec", "apt-get", "install", "-y", "libxcb-cursor0"])
+        if ctypes.util.find_library("xcb-cursor"):
+            log("libxcb-cursor0 installed")
+            return True
+    message = ("Missing system library. Install it and start again: sudo apt install libxcb-cursor0 "
+               "(Fedora: sudo dnf install xcb-util-cursor, Arch: sudo pacman -S xcb-util-cursor)")
+    log(message)
+    notify(message)
+    return False
+
+
 def has_pip(python):
     return subprocess.call([python, "-m", "pip", "--version"],
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
@@ -275,7 +299,20 @@ def start(python, args):
         options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | 0x08000000
     else:
         options["start_new_session"] = True
-    subprocess.Popen([python, os.path.join(APP_DIR, "tree.py"), *args], **options)
+    process = subprocess.Popen([python, os.path.join(APP_DIR, "tree.py"), *args], **options)
+    try:                                                      # a start that fails at once is reported
+        process.wait(timeout=4)
+    except subprocess.TimeoutExpired:
+        return True
+    if process.returncode == 0:
+        return True
+    log_file.close()
+    with open(os.path.join(APP_DIR, "tree.log")) as f:
+        lines = [line.strip() for line in f if line.strip()]
+    reason = lines[-1] if lines else f"exit code {process.returncode}"
+    log(f"the tree could not start: {reason}")
+    notify(f"The tree could not start: {reason[:200]}. Details: {os.path.join(APP_DIR, 'tree.log')}")
+    return False
 
 
 def lock():
@@ -325,8 +362,12 @@ def run():
         return 1
     if stop:
         return subprocess.call([python, os.path.join(APP_DIR, "tree.py"), "--stop"])
-    start(python, args)
+    if not system_library():
+        return 1
+    started = start(python, args)
     add_icons()
+    if not started:
+        return 1
     log("started")
     return 0
 
