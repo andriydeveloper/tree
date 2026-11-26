@@ -48,7 +48,9 @@ To close the tree: right click > Close, or `start.bat --stop` / `./start.sh stop
 
 ## Settings
 
-Right click > Settings. All values are applied at once and saved to `settings.json` next to the
+Right click > Settings. Languages: English (default), Ukrainian, German; "Reset to defaults" keeps
+the language. Numbers are set with sliders (min and max at the ends) or typed in; the mouse wheel
+changes a value after a click on it. All values are applied at once and saved to `settings.json` next to the
 app (only the values that differ from the defaults). An update never touches this file.
 `Tree seed` keeps a tree you like: the seed of the current tree is written to `tree.log`.
 
@@ -65,6 +67,7 @@ and push to `main`. A git clone is updated with `git pull --ff-only` instead.
 | `start.bat`, `start.sh` | start by double click / from the terminal |
 | `launcher.py` | update, environment, libraries, start (standard library only) |
 | `tree.py` | the tree itself |
+| `translations.py` | Ukrainian and German texts |
 | `requirements.txt` | libraries the tree needs |
 | `VERSION` | version used by the update check |
 | `wimo-logo-blau.svg` | the logo shape |

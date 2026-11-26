@@ -29,8 +29,10 @@ from PySide6.QtGui import QGuiApplication, QImage, QPainter
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout,
-                               QLabel, QLineEdit, QMenu, QPushButton, QScrollArea, QSpinBox, QTabWidget,
-                               QVBoxLayout, QWidget)
+                               QLabel, QLineEdit, QMenu, QPushButton, QScrollArea, QSlider, QSpinBox,
+                               QTabWidget, QVBoxLayout, QWidget)
+
+from translations import LANGUAGES, TEXTS
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP_NAME = "Christmas tree"
@@ -50,6 +52,7 @@ TREE_HEIGHT = 258             # tree height incl. gifts, px; only the tree grows
 RANDOM_GIFTS = True           # False = the classic fixed gifts
 GIFT_COUNT = (3, 6)           # random gifts under the tree
 RANDOM_TOPPER = True          # False = the classic yellow star on top
+LANGUAGE = "en"               # en, uk, de; "Reset to defaults" keeps it
 SHOW_TOPPER = True            # star (topper) on the tree top
 SHOW_SNOW = True              # falling snow and snow on branches
 SHOW_GIFTS = True             # gifts under the tree
@@ -2865,7 +2868,7 @@ def tree_geometry():
 
 def draw_loader(cr, share):
     """Small progress pill in the middle of the tree area: "Growing tree 42%" and a bar."""
-    text = f"Growing tree {int(share * 100)}%"
+    text = f"{tr('Growing tree')} {int(share * 100)}%"
     w, h = 132, 34
     x, y = TREE_X + TREE_W / 2 - w / 2, TREE_Y + TREE_H * 0.55 - h / 2
     r = 9
@@ -2901,6 +2904,7 @@ SETTINGS_FILE = os.path.join(HERE, "settings.json")
 # Every tunable value: (tab, name, label, kind, min, max, step). Kinds: int, float, range (min..max pair),
 # irange (int pair), bool, choice (min = options), seed (empty = random).
 SETTINGS = [
+    ("General", "LANGUAGE", "Language", "choice", tuple(LANGUAGES), None, None),
     ("General", "TREE_STYLE", "Tree style", "choice", ("random", "classic"), None, None),
     ("General", "TREE_SEED", "Tree seed (empty = new tree every start)", "seed", None, None, None),
     ("General", "TREE_HEIGHT", "Tree height, px (only the tree grows)", "int", 120, 900, 2),
@@ -2999,6 +3003,11 @@ SETTINGS = [
 DEFAULTS = {name: globals()[name] for _, name, *_ in SETTINGS}
 
 
+def tr(text):
+    """Text in the chosen language (English when there is no translation)."""
+    return TEXTS.get(LANGUAGE, {}).get(text, text)
+
+
 def clean_value(kind, value, lo, hi):
     """Bring a value from the file or the dialog to its kind and limits."""
     if kind == "seed":
@@ -3042,15 +3051,86 @@ def save_settings():
         json.dump(changed, f, indent=2)
 
 
+def focused_wheel(cls):
+    """The wheel changes the value only after a click; otherwise it scrolls the settings page."""
+    class Widget(cls):
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.setFocusPolicy(Qt.StrongFocus)
+
+        def wheelEvent(self, event):
+            if self.hasFocus():
+                super().wheelEvent(event)
+            else:
+                event.ignore()                             # goes on to the scroll area
+    return Widget
+
+
+WheelSlider, WheelSpinBox, WheelDoubleSpinBox = map(focused_wheel, (QSlider, QSpinBox, QDoubleSpinBox))
+
+
+class Slider(QWidget):
+    """Slider for the mouse (drag or wheel) + number field for exact values, with min and max at the ends."""
+
+    def __init__(self, kind, lo, hi, step):
+        super().__init__()
+        self.lo, self.step = lo, step
+        self.integer = kind in ("int", "irange")
+        self.decimals = 0 if self.integer or step >= 1 else max(1, -math.floor(math.log10(step) + 1e-9))
+        self.slider = WheelSlider(Qt.Horizontal)
+        self.slider.setRange(0, round((hi - lo) / step))
+        self.slider.setMinimumWidth(120)
+        if self.integer:
+            self.field = WheelSpinBox()
+            self.field.setRange(int(lo), int(hi))
+            self.field.setSingleStep(max(1, int(step)))
+        else:
+            self.field = WheelDoubleSpinBox()
+            self.field.setDecimals(self.decimals)
+            self.field.setRange(lo, hi)
+            self.field.setSingleStep(step)
+        self.field.setMinimumWidth(80)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        for widget in (self.edge(lo, Qt.AlignRight), self.slider, self.edge(hi, Qt.AlignLeft), self.field):
+            row.addWidget(widget, 1 if widget is self.slider else 0)
+        self.slider.valueChanged.connect(lambda pos: self.field.setValue(self.cast(lo + pos * step)))
+        self.field.valueChanged.connect(self.follow_field)
+
+    def edge(self, v, align):
+        label = QLabel(f"{v:.{self.decimals}f}")
+        label.setStyleSheet("color: gray; font-size: 10px")
+        label.setFixedWidth(30)                            # same slider length in every row
+        label.setAlignment(align | Qt.AlignVCenter)
+        return label
+
+    def cast(self, v):
+        return int(round(v)) if self.integer else round(v, self.decimals)
+
+    def follow_field(self, v):
+        pos = round((v - self.lo) / self.step)
+        if pos != self.slider.value():
+            self.slider.blockSignals(True)                 # keep a typed value, do not round it to the step
+            self.slider.setValue(pos)
+            self.slider.blockSignals(False)
+
+    def value(self):
+        return self.field.value()
+
+    def setValue(self, v):
+        self.field.setValue(v)
+
+
 class SettingsWindow(QWidget):
     """All settings in tabs. Apply = use now and save to settings.json."""
 
-    def __init__(self, on_apply):
+    def __init__(self, on_apply, on_language=None):
         super().__init__(None, Qt.Window | Qt.WindowStaysOnTopHint)
-        self.setWindowTitle(f"Christmas tree settings ({__version__})")
+        self.setWindowTitle(f"{tr('Christmas tree settings')} ({__version__})")
         self.setAttribute(Qt.WA_DeleteOnClose)
-        self.resize(600, 600)
+        self.resize(780, 640)
         self.on_apply = on_apply
+        self.on_language = on_language                     # reopens the window in the new language
         self.editors = {}
 
         tabs, grids = QTabWidget(), {}
@@ -3058,15 +3138,17 @@ class SettingsWindow(QWidget):
             if tab not in grids:
                 page = QWidget()
                 grid = QGridLayout(page)
-                grid.setColumnStretch(0, 1)
+                grid.setColumnStretch(1, 1)
                 scroll = QScrollArea()
                 scroll.setWidgetResizable(True)
                 scroll.setWidget(page)
-                tabs.addTab(scroll, tab)
+                tabs.addTab(scroll, tr(tab))
                 grids[tab] = [grid, 0]
             grid, row = grids[tab]
-            text = QLabel(label)
+            text = QLabel(tr(label))
             text.setToolTip(name)
+            text.setWordWrap(True)
+            text.setMinimumWidth(200)
             widget, get, put = self.editor(kind, lo, hi, step)
             grid.addWidget(text, row, 0)
             grid.addWidget(widget, row, 1)
@@ -3082,7 +3164,7 @@ class SettingsWindow(QWidget):
             if label is None:
                 buttons.addStretch(1)
                 continue
-            button = QPushButton(label)
+            button = QPushButton(tr(label))
             button.clicked.connect(handler)
             buttons.addWidget(button)
         self.status = QLabel()
@@ -3094,19 +3176,6 @@ class SettingsWindow(QWidget):
         box.addLayout(buttons)
         box.addWidget(author)
 
-    @staticmethod
-    def spin(kind, lo, hi, step):
-        if kind in ("int", "irange"):
-            w = QSpinBox()
-            w.setRange(int(lo), int(hi))
-            w.setSingleStep(max(1, int(step)))
-        else:
-            w = QDoubleSpinBox()
-            w.setDecimals(0 if step >= 1 else max(1, -math.floor(math.log10(step))))
-            w.setRange(lo, hi)
-            w.setSingleStep(step)
-        return w
-
     def editor(self, kind, lo, hi, step):
         """Widget for one setting + getter + setter."""
         if kind == "bool":
@@ -3114,28 +3183,30 @@ class SettingsWindow(QWidget):
             return w, w.isChecked, lambda v: w.setChecked(bool(v))
         if kind == "choice":
             w = QComboBox()
-            w.addItems(list(lo))
-            return w, w.currentText, lambda v: w.setCurrentIndex(lo.index(v))
+            w.addItems([LANGUAGES.get(v) or tr(v) for v in lo])   # values are kept, names are shown
+            return w, lambda: lo[w.currentIndex()], lambda v: w.setCurrentIndex(lo.index(v))
         if kind == "seed":
             w = QLineEdit()
-            w.setPlaceholderText("random")
+            w.setPlaceholderText(tr("random"))
             return w, lambda: w.text().strip(), lambda v: w.setText("" if v is None else str(v))
         if kind in ("range", "irange"):
-            a, b = self.spin(kind, lo, hi, step), self.spin(kind, lo, hi, step)
+            a, b = Slider(kind, lo, hi, step), Slider(kind, lo, hi, step)
             box = QWidget()
-            row = QHBoxLayout(box)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.addWidget(a)
-            row.addWidget(QLabel("to"))
-            row.addWidget(b)
+            rows = QGridLayout(box)
+            rows.setContentsMargins(0, 0, 0, 0)
+            rows.setColumnStretch(1, 1)
+            for i, (word, slider) in enumerate((("from", a), ("to", b))):
+                rows.addWidget(QLabel(tr(word)), i, 0)
+                rows.addWidget(slider, i, 1)
             return box, lambda: (a.value(), b.value()), lambda v: (a.setValue(v[0]), b.setValue(v[1]))
-        w = self.spin(kind, lo, hi, step)
+        w = Slider(kind, lo, hi, step)
         return w, w.value, w.setValue
 
     def on_reset(self):
         for name, (kind, lo, hi, get, put) in self.editors.items():
-            put(DEFAULTS[name])
-        self.status.setText("Defaults loaded, press Apply to use them.")
+            if name != "LANGUAGE":                         # the language stays as chosen
+                put(DEFAULTS[name])
+        self.status.setText(tr("Defaults loaded, press Apply to use them."))
 
     def collect(self):
         values = {}
@@ -3143,7 +3214,7 @@ class SettingsWindow(QWidget):
             try:
                 values[name] = clean_value(kind, get(), lo, hi)
             except (TypeError, ValueError):
-                self.status.setText(f"Invalid value: {name}")
+                self.status.setText(f"{tr('Invalid value')}: {name}")
                 return None
         return values
 
@@ -3151,10 +3222,14 @@ class SettingsWindow(QWidget):
         values = self.collect()
         if values is None:
             return False
+        language = LANGUAGE
         self.on_apply(values)
+        if LANGUAGE != language and self.on_language:
+            self.on_language(self)                          # the window is built again in the new language
+            return True
         for name, (kind, lo, hi, get, put) in self.editors.items():
             put(globals()[name])                           # show cleaned values (sorted ranges etc.)
-        self.status.setText(f"Applied and saved to {SETTINGS_FILE}")
+        self.status.setText(f"{tr('Applied and saved to')} {SETTINGS_FILE}")
         return True
 
     def on_ok(self):
@@ -3241,11 +3316,11 @@ class TreeWindow(QWidget):
 
     def show_menu(self, pos):
         menu = QMenu(self)
-        menu.addAction("New random tree", self.scene.grow_tree)
+        menu.addAction(tr("New random tree"), self.scene.grow_tree)
         menu.addSeparator()
-        menu.addAction("Settings…", self.open_settings)
+        menu.addAction(tr("Settings…"), self.open_settings)
         menu.addSeparator()
-        menu.addAction("Close", QApplication.quit)
+        menu.addAction(tr("Close"), QApplication.quit)
         menu.exec(pos)
 
     def open_settings(self):
@@ -3253,8 +3328,20 @@ class TreeWindow(QWidget):
             self.settings.raise_()
             self.settings.activateWindow()
             return
-        self.settings = SettingsWindow(self.apply_settings)
+        self.settings = SettingsWindow(self.apply_settings, self.reopen_settings)
         self.settings.destroyed.connect(lambda *_: setattr(self, "settings", None))
+        self.settings.show()
+
+    def reopen_settings(self, old):
+        """After a language change: the same window again, in the new language and at the same place."""
+        geometry, tab = old.geometry(), old.findChild(QTabWidget).currentIndex()
+        old.destroyed.disconnect()
+        old.close()
+        self.settings = SettingsWindow(self.apply_settings, self.reopen_settings)
+        self.settings.destroyed.connect(lambda *_: setattr(self, "settings", None))
+        self.settings.setGeometry(geometry)
+        self.settings.findChild(QTabWidget).setCurrentIndex(tab)
+        self.settings.status.setText(f"{tr('Applied and saved to')} {SETTINGS_FILE}")
         self.settings.show()
 
     def apply_settings(self, values):
