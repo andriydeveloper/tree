@@ -64,7 +64,7 @@ LIGHT_CHANGE_S = (0.5, 1.6)   # each ornament changes its color at its own pace,
 LIGHT_FADE_S = 0.3            # color crossfade of one ornament, s
 
 # Logo orbit
-LOGO_ENABLED = True           # show the flying WiMo logo
+LOGO_ENABLED = False          # show the flying WiMo logo (off by default)
 LOGO_W = 70                   # logo width in front, px (height keeps 714:516 ratio)
 LOGO_ALPHA = 0.7              # logo opacity: 1 = opaque, 0 = invisible
 LOGO_DEPTH = 4                # logo thickness (3D), px
