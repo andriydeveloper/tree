@@ -1381,62 +1381,114 @@ class Spruce:
         total = round(rng.randint(*SPRUCE_CONES) * self.k)
         for b in rng.sample(spots, min(len(spots), total)):
             for _ in range(min(rng.choice((1, 1, 2)), total - len(self.cones))):   # sometimes a pair
-                x, y, _ = self.along(b["pts"], rng.uniform(0.55, 0.9))
+                f = rng.uniform(0.55, 0.9)
+                x, y, _ = self.along(b["pts"], f)
                 cone = {"x": x + rng.uniform(-1, 1), "y": y + 1, "len": rng.uniform(6, 9),
-                        "tilt": rng.uniform(-0.25, 0.25)}
+                        "tilt": rng.uniform(-0.25, 0.25), "f": f}
                 b["cones"].append(cone)
                 self.cones.append(cone)
 
+    def limb(self, rng, x, y, az, pitch, length, bend, droop):
+        """
+        A curved side limb: its direction wanders (smoothed random turns = natural bends) and
+        sinks under its weight. Returns points (x, y, pitch, azimuth).
+        """
+        steps = max(3, int(length / 2.2))
+        pts = [(x, y, pitch, az)]
+        turn_az = turn_pitch = 0.0
+        for _ in range(steps):
+            turn_az = 0.6 * turn_az + rng.gauss(0, bend)
+            turn_pitch = 0.6 * turn_pitch + rng.gauss(0, bend)
+            az += turn_az
+            pitch += turn_pitch + droop / steps
+            dx, dy = self.project(length / steps, az, pitch)
+            x, y = x + dx, y + dy
+            pts.append((x, y, pitch, az))
+        return pts
+
     def branch(self, y, az, length, hy):
+        """
+        One branch from the trunk, built like a real one: the main limb bends randomly, side limbs
+        grow from it alternately left and right, and small twigs from those. Needles come later.
+        twigs: (points, depth, place on the main limb 0..1, order 2 = side limb / 3 = twig).
+        """
         rng = self.rng
         pitch0 = -0.35 + 0.7 * hy + rng.uniform(-0.12, 0.12)   # upper ones point up, lower ones droop
         sag = rng.uniform(0.1, 0.3)                          # bends down under its own weight
         curl = rng.uniform(0.15, 0.45)                       # tip turns up
+        trng = random.Random(rng.random())                   # shape of this branch
         x, yy = self.trunk_x(y), y
-        pts = [(x, yy, pitch0)]
+        pts, azs = [(x, yy, pitch0)], [az]
         steps = max(4, int(length / 3))
+        wander_pitch = wander_az = 0.0
         for i in range(1, steps + 1):
             f = i / steps
-            pitch = pitch0 + sag * f - curl * smoothstep((f - 0.6) / 0.4)
-            dx, dy = self.project(length / steps, az, pitch)
+            wander_pitch = 0.75 * wander_pitch + trng.gauss(0, 0.06)   # the main limb is never straight
+            wander_az = 0.75 * wander_az + trng.gauss(0, 0.05)
+            pitch = pitch0 + sag * f - curl * smoothstep((f - 0.6) / 0.4) + wander_pitch
+            dx, dy = self.project(length / steps, az + wander_az, pitch)
             x, yy = x + dx, yy + dy
             pts.append((x, yy, pitch))
-        # side twigs: alternating left and right, shorter towards the tip; inner part stays bare
+            azs.append(az + wander_az)
+
         twigs = []
-        trng = random.Random(rng.random())                   # twig layout of this branch
-        s = length * trng.uniform(0.15, 0.3)
+        s = length * trng.uniform(0.15, 0.3)                 # inner part of the branch stays bare
         side = trng.choice((1, -1))
         while s < length * 0.97:
             f = s / length
             tx, ty, pitch = self.along(pts, f)
+            local_az = azs[min(len(azs) - 1, round(f * (len(azs) - 1)))]
             for sd in ((side, -side) if trng.random() < 0.7 else (side,)):
-                tw_az = az + sd * trng.uniform(0.6, 1.05)
-                tw_pitch = pitch + trng.uniform(-0.45, 0.6)
-                tw_len = min(18.0 * self.k, (1 - f) ** 0.7 * length * 0.45 * trng.uniform(0.7, 1.2) + 3.5)
-                line = [(tx, ty)]
-                for k in (1, 2, 3):                          # twig bends down a little
-                    dx, dy = self.project(tw_len / 3, tw_az, tw_pitch + 0.12 * k)
-                    line.append((line[-1][0] + dx, line[-1][1] + dy))
-                twigs.append((line, math.sin(tw_az), f))
+                sub_az = local_az + sd * trng.uniform(0.55, 1.05)
+                sub_len = min(18.0 * self.k, (1 - f) ** 0.7 * length * 0.45 * trng.uniform(0.7, 1.2) + 3.5)
+                sub = self.limb(trng, tx, ty, sub_az, pitch + trng.uniform(-0.35, 0.5), sub_len, 0.09, 0.35)
+                twigs.append(([p[:2] for p in sub], math.sin(sub_az), f, 2))
+                g = trng.uniform(0.2, 0.35)                  # twigs on the side limb
+                twig_side = trng.choice((1, -1))
+                while g < 0.95:
+                    twig_len = (1 - g) ** 0.8 * sub_len * 0.5 * trng.uniform(0.6, 1.2) + 1.5
+                    if twig_len > 2.5 and trng.random() < 0.75:
+                        i = min(len(sub) - 1, round(g * (len(sub) - 1)))
+                        sx, sy, sp, sa = sub[i]
+                        twig_az = sa + twig_side * trng.uniform(0.6, 1.1)
+                        twig = self.limb(trng, sx, sy, twig_az, sp + trng.uniform(-0.3, 0.5), twig_len, 0.12, 0.3)
+                        twigs.append(([p[:2] for p in twig], math.sin(twig_az), f, 3))
+                    twig_side = -twig_side
+                    g += trng.uniform(2.0, 3.5) / sub_len
             side = -side
             s += trng.uniform(2.5, 4.5)
 
         # A low branch must not reach the ground: the whole branch with its twigs is lifted
         # (its drop scaled down) so it keeps its shape, only its lowest point meets the limit.
-        low = max([p[1] for p in pts] + [p[1] for line, _, _ in twigs for p in line])
+        low = max([p[1] for p in pts] + [p[1] for t in twigs for p in t[0]])
         if low > self.low_limit:
             squash = max(0.0, (self.low_limit - y) / (low - y))
             lift = lambda py: y + (py - y) * squash
             pts = [(px, lift(py), math.atan(math.tan(pitch) * squash)) for px, py, pitch in pts]
-            twigs = [([(px, lift(py)) for px, py in line], depth, f) for line, depth, f in twigs]
+            twigs = [([(px, lift(py)) for px, py in line], depth, f, order) for line, depth, f, order in twigs]
+
+        # Long branches bend in the wind at a joint: the outer part is lighter and swings on its own.
+        joint = trng.uniform(0.45, 0.6) if length > 14 * self.k else 1.01
+        snowy = trng.random() < self.snow and math.sin(az) > -0.4
+        snow = []                                            # clumps on the outer part, decided here
+        if snowy:
+            f = trng.uniform(0.45, 0.7)
+            while f < 0.97:
+                if trng.random() < 0.55:
+                    sx, sy, _ = self.along(pts, f)
+                    snow.append((f, sx + trng.uniform(-1, 1), sy - 1.4, trng.uniform(1.1, 2.4), trng.uniform(0.6, 1.1)))
+                f += trng.uniform(0.06, 0.12)
         return {"pts": pts, "twigs": twigs, "az": az, "depth": math.sin(az), "len": length, "hy": hy,
-                "vigor": rng.uniform(0.75, 1.25), "cones": []}
+                "vigor": rng.uniform(0.75, 1.25), "cones": [], "joint": joint, "snowy": snowy, "snow": snow}
 
     # ----- drawing -----
 
     def add_needles(self, needles, line, depth, vigor, outer):
         """Needles along a twig. Each twig gets its own density: denser and sparser spots."""
         rng = self.rng
+        rand = rng.random                                    # hot loop: plain random() calls
+        len_lo, len_span = NEEDLE_LEN[0], NEEDLE_LEN[1] - NEEDLE_LEN[0]
+        far = 0.55 + 0.45 * (depth + 1) / 2                  # far side of the tree is darker
         density = rng.uniform(*NEEDLE_DENSITY) * vigor
         fresh = rng.random() < self.fresh
         segs = [(a, b, math.hypot(b[0] - a[0], b[1] - a[1])) for a, b in zip(line, line[1:])]
@@ -1451,20 +1503,24 @@ class Spruce:
             x, y = x0 + (x1 - x0) * k, y0 + (y1 - y0) * k
             tx, ty = ((x1 - x0) / ln, (y1 - y0) / ln) if ln else (1, 0)
             frac = pos / total
+            light = 0.5 - 0.5 * (x - self.cx) / self.half        # lit from the left
+            base = 0.45 + 0.35 * light + 0.35 * outer
+            tip = fresh and frac > 0.75
             for side in (1, -1):
-                if rng.random() > 0.85:
+                if rand() > 0.85:
                     continue
-                a = side * rng.uniform(0.55, 1.2)               # needles point forward along the twig
-                length = rng.uniform(*NEEDLE_LEN) * rng.uniform(0.55, 1.0) * (1 - 0.3 * frac)
-                nx = tx * math.cos(a) - ty * math.sin(a)
-                ny = tx * math.sin(a) + ty * math.cos(a) + 0.2
-                light = 0.5 - 0.5 * (x - self.cx) / self.half    # lit from the left
-                shade = ((0.45 + 0.35 * light + 0.35 * outer - 0.35 * ny) * (0.55 + 0.45 * (depth + 1) / 2)
-                         * rng.uniform(0.85, 1.15))
+                a = side * (0.55 + 0.65 * rand())               # needles point forward along the twig
+                length = (len_lo + len_span * rand()) * (0.55 + 0.45 * rand()) * (1 - 0.3 * frac)
+                ca, sa = math.cos(a), math.sin(a)
+                nx = tx * ca - ty * sa
+                ny = tx * sa + ty * ca + 0.2
+                shade = (base - 0.35 * ny) * far * (0.85 + 0.3 * rand())
                 level = max(0, min(9, int(shade * 7)))
-                needles.setdefault((level, fresh and frac > 0.75), []).append(
-                    (x, y, x + nx * length, y + ny * length))
-            pos += rng.uniform(0.6, 1.4) / density
+                bucket = needles.get((level, tip))
+                if bucket is None:
+                    bucket = needles[(level, tip)] = []
+                bucket.append((x, y, x + nx * length, y + ny * length))
+            pos += (0.6 + 0.8 * rand()) / density
 
     def stroke_needles(self, cr, needles):
         """Needles are grouped by shade, one stroke per group."""
@@ -1480,50 +1536,65 @@ class Spruce:
                 cr.line_to(x1, y1)
             cr.stroke()
 
-    def draw_branch(self, cr, b):
-        rng = self.rng
+    def link_of(self, b, f):
+        """0 = inner part of the branch, 1 = outer part (beyond the joint)."""
+        return 1 if f >= b["joint"] else 0
+
+    def draw_branch(self, cr, b, link=None):
+        """Wood, needles, snow and cones of a branch; link 0/1 draws only the inner/outer part."""
         pts = b["pts"]
         n = len(pts) - 1
+        cut = round(b["joint"] * n) if link is not None and b["joint"] < 1 else None
+        mine = lambda f: link is None or self.link_of(b, f) == link
         dark = 0.6 + 0.4 * (b["depth"] + 1) / 2              # far side of the tree is darker
         wood = tuple(c * dark for c in self.wood_rgb)
         cr.set_line_cap(cairo.LINE_CAP_ROUND)
         cr.set_source_rgb(*wood)
-        for i in range(n):                                   # wood: thick at the trunk, thin at the tip
+        for i in range(n):                                   # main limb: thick at the trunk, thin at the tip
+            if cut is not None and (i < cut) != (link == 0):
+                continue
             cr.set_line_width(max(0.5, 1.4 * (1 - i / n) * min(1.0, b["len"] / 30)))
             cr.move_to(*pts[i][:2])
             cr.line_to(*pts[i + 1][:2])
             cr.stroke()
 
         needles = {}
-        cr.set_line_width(0.5)
-        for line, depth, f in b["twigs"]:
-            cr.set_source_rgba(*wood, 0.8)
-            cr.move_to(*line[0])
-            for p in line[1:]:
-                cr.line_to(*p)
+        mine_twigs = [t for t in b["twigs"] if mine(t[2])]
+        # wood: side limbs taper in two steps, twigs are thin; one stroke per group is much faster
+        for alpha, width, pieces in ((0.85, 0.6, [t[0][:len(t[0]) // 2 + 1] for t in mine_twigs if t[3] == 2]),
+                                     (0.85, 0.42, [t[0][len(t[0]) // 2:] for t in mine_twigs if t[3] == 2]),
+                                     (0.7, 0.35, [t[0] for t in mine_twigs if t[3] == 3])):
+            for line in pieces:
+                cr.move_to(*line[0])
+                for p in line[1:]:
+                    cr.line_to(*p)
+            cr.set_source_rgba(*wood, alpha)
+            cr.set_line_width(width)
             cr.stroke()
-            self.add_needles(needles, line, depth, b["vigor"], f)
-        outer = [p[:2] for p in pts[int(n * 0.3):]]          # needles on the branch itself
+        for line, depth, f, order in mine_twigs:
+            # needles: on the outer part of side limbs, all along the small twigs
+            m = len(line) - 1
+            self.add_needles(needles, line[int(m * 0.35):] if order == 2 else line, depth, b["vigor"], f)
+        first = int(n * 0.3)                                 # needles on the main limb itself
+        outer = [p[:2] for p in pts[first:]]
+        if cut is not None:
+            outer = [p[:2] for p in (pts[first:cut + 1] if link == 0 else pts[max(first, cut):])]
         if len(outer) > 1:
             self.add_needles(needles, outer, b["depth"], b["vigor"], 1.0)
         self.stroke_needles(cr, needles)
 
-        if b["depth"] > -0.4 and rng.random() < self.snow:   # snow lies on the outer part
-            b["snowy"] = True
-            cr.set_source_rgba(1, 1, 1, 0.8)
-            f = rng.uniform(0.45, 0.7)
-            while f < 0.97:
-                if rng.random() < 0.55:
-                    x, y, _ = self.along(pts, f)
-                    cr.save()
-                    cr.translate(x + rng.uniform(-1, 1), y - 1.4)
-                    cr.scale(rng.uniform(1.1, 2.4), rng.uniform(0.6, 1.1))
-                    cr.arc(0, 0, 1, 0, 2 * math.pi)
-                    cr.restore()
-                    cr.fill()
-                f += rng.uniform(0.06, 0.12)
+        cr.set_source_rgba(1, 1, 1, 0.8)
+        for f, x, y, sx, sy in b["snow"]:                    # snow lies on the outer part
+            if mine(f):
+                cr.save()
+                cr.translate(x, y)
+                cr.scale(sx, sy)
+                cr.arc(0, 0, 1, 0, 2 * math.pi)
+                cr.restore()
+                cr.fill()
         for c in b["cones"]:
-            draw_cone(cr, c["x"], c["y"], c["len"], c["tilt"], self.cone_rgb)
+            if mine(c["f"]):
+                draw_cone(cr, c["x"], c["y"], c["len"], c["tilt"], self.cone_rgb)
 
     def trunk_path(self, cr, ys):
         cr.move_to(self.trunk_x(ys[0]) - self.trunk_w(ys[0]), ys[0])
@@ -1742,14 +1813,20 @@ class Spruce:
         """Every branch in its own small bitmap, so it can swing around its attach point."""
         sprites = []
         for b in branches:
-            pts = [p[:2] for p in b["pts"]] + [p for line, _, _ in b["twigs"] for p in line]
-            x0, x1 = min(p[0] for p in pts) - 8, max(p[0] for p in pts) + 8
-            y0, y1 = min(p[1] for p in pts) - 8, max(p[1] for p in pts) + 16   # needles, snow, cones
-            sprite, cr = tree_part(x0, y0, x1 - x0, y1 - y0)
-            self.draw_branch(cr, b)
-            sprite.update(branch=self.branches.index(b), ax=b["pts"][0][0], ay=b["pts"][0][1],
-                          filter=cairo.FILTER_BILINEAR)              # 3x faster than GOOD, same at 1:2
-            sprites.append(sprite)
+            jx, jy, _ = self.along(b["pts"], min(1.0, b["joint"]))
+            n = len(b["pts"]) - 1
+            for link in ((0, 1) if b["joint"] < 1 else (0,)):   # inner part, outer part
+                cut = round(b["joint"] * n)
+                main = b["pts"] if b["joint"] >= 1 else (b["pts"][:cut + 1] if link == 0 else b["pts"][cut:])
+                pts = [p[:2] for p in main] + [p for line, _, f, _ in b["twigs"]
+                                                if b["joint"] >= 1 or self.link_of(b, f) == link for p in line]
+                x0, x1 = min(p[0] for p in pts) - 8, max(p[0] for p in pts) + 8
+                y0, y1 = min(p[1] for p in pts) - 8, max(p[1] for p in pts) + 16   # needles, snow, cones
+                sprite, cr = tree_part(x0, y0, x1 - x0, y1 - y0)
+                self.draw_branch(cr, b, link if b["joint"] < 1 else None)
+                sprite.update(branch=self.branches.index(b), link=link, ax=b["pts"][0][0], ay=b["pts"][0][1],
+                              jx=jx, jy=jy, filter=cairo.FILTER_BILINEAR)   # 3x faster than GOOD, same at 1:2
+                sprites.append(sprite)
         return {"mode": "branches", "sprites": sprites}
 
     def branch_physics(self):
@@ -1766,7 +1843,7 @@ class Spruce:
         grid, own = {}, []
         for b in self.branches:                              # density map of the crown
             mine = {}
-            for line in [[p[:2] for p in b["pts"]]] + [line for line, _, _ in b["twigs"]]:
+            for line in [[p[:2] for p in b["pts"]]] + [t[0] for t in b["twigs"]]:
                 for (xa, ya), (xb, yb) in zip(line, line[1:]):
                     n = max(1, int(math.hypot(xb - xa, yb - ya) / (cell * 0.5)))
                     for i in range(n):
@@ -1796,14 +1873,21 @@ class Spruce:
         out = []
         for b, sums in zip(self.branches, raw):
             length = b["len"] / self.k
-            foliage = sum(math.hypot(xb - xa, yb - ya) for line, _, _ in b["twigs"]
-                          for (xa, ya), (xb, yb) in zip(line, line[1:])) / self.k * b["vigor"]
+            foliage = sum(math.hypot(xb - xa, yb - ya) for t in b["twigs"]
+                          for (xa, ya), (xb, yb) in zip(t[0], t[0][1:])) / self.k * b["vigor"]
+            outer = sum(math.hypot(xb - xa, yb - ya) for t in b["twigs"] if t[2] >= b["joint"]
+                        for (xa, ya), (xb, yb) in zip(t[0], t[0][1:])) / self.k * b["vigor"]
             snow = 1.35 if b.get("snowy") else 1.0
             x, y, _ = self.along(b["pts"], 0.6)
             ax, ay = b["pts"][0][:2]
             reach = math.hypot(x - ax, y - ay) or 1.0
+            dx, dy = (x - ax) / reach, (y - ay) / reach
+            jx, jy, _ = self.along(b["pts"], min(1.0, b["joint"]))
             out.append({
-                "ax": ax, "ay": ay, "dir": ((x - ax) / reach, (y - ay) / reach),
+                "ax": ax, "ay": ay, "dir": (dx, dy),
+                "joint": (jx, jy) if b["joint"] < 1 else None,
+                "jdist": (jx - ax) * dx + (jy - ay) * dy,        # points farther along belong to the outer part
+                "outer": outer / max(1e-6, foliage),             # share of the foliage on the outer part
                 "length": length, "mass": (foliage + 0.4 * length) * snow + 4 * len(b["cones"]),
                 "sail": foliage * (1.1 if snow > 1 else 1.0), "strength": rng.uniform(0.7, 1.35),
                 "exposure": [math.exp(-v / median * math.log(2.5)) for v in sums],   # median branch: 0.4
@@ -1905,7 +1989,7 @@ class Spruce:
 
         def crown_layer():
             part, cr = tree_part(-margin, 0, TREE_W + 2 * margin, TREE_H)
-            part.update(mode="strips", h=TREE_H, w=TREE_W + 2 * margin)
+            part.update(mode="strips", h=TREE_H, w=TREE_W + 2 * margin, filter=cairo.FILTER_BILINEAR)
             return part, cr
 
         reach = lambda b: b["depth"] * b["len"]              # how far the tip comes towards the viewer
@@ -1918,7 +2002,7 @@ class Spruce:
         x1 = max(self.trunk_x(y) + self.trunk_w(y) for y in ys) + 10 * self.k
         y0 = int(self.top) - 12
         trunk, cr = tree_part(x0, y0, x1 - x0, TREE_BASE_Y + 4 - y0)
-        trunk.update(mode="strips", h=TREE_BASE_Y + 4 - y0, w=x1 - x0)
+        trunk.update(mode="strips", h=TREE_BASE_Y + 4 - y0, w=x1 - x0, filter=cairo.FILTER_BILINEAR)
         self.draw_trunk(cr)
         leader = {}                                          # needles on the leader above the top whorl
         self.add_needles(leader, [(self.trunk_x(self.top + 12), self.top + 12),
@@ -1967,6 +2051,8 @@ class TreeSway:
         self.angle_v = [0.0] * len(self.branches)
         self.squash = [0.0] * len(self.branches)           # <0 pressed to the trunk, >0 streaming out
         self.squash_v = [0.0] * len(self.branches)
+        self.tip = [0.0] * len(self.branches)              # outer part turn at the joint
+        self.tip_v = [0.0] * len(self.branches)
         # sagging garland spans are pendulums too: angle, velocity, own frequency
         spans = sum(len(g["sags"]) for g in garlands if isinstance(g, dict))
         self.gswing = [[0.0, 0.0, random.uniform(2.0, 3.5)] for _ in range(spans)]
@@ -2040,11 +2126,18 @@ class TreeSway:
             squash = max(-0.25, min(0.08, soft * (-0.14 * max(0.0, -along) + 0.04 * max(0.0, along))))
             a, v, w = self.angle[i], self.angle_v[i], b["freq"]
             q, qv = self.squash[i], self.squash_v[i]
+            # outer part: lighter, so it bends further and flutters faster; lags when the inner part moves
+            tip_target = 0.45 * math.tanh(0.9 * target * (0.6 + b.get("outer", 0.5)) / 0.45)
+            tip_target += BRANCH_FLUTTER * 0.06 * (abs(wx) + wy) * soft ** 0.5 * math.sin(t * f1 * 2.1 + p2)
+            c, cv, tw = self.tip[i], self.tip_v[i], min(14.0, w * 1.8)
             for _ in range(steps):
+                a0 = v
                 a, v = spring(a, v, target, w, BRANCH_DAMP, h)
                 q, qv = spring(q, qv, squash, w, BRANCH_DAMP, h)
+                c, cv = spring(c, cv, tip_target - 0.02 * (v - a0) / h, tw, BRANCH_DAMP, h)
             self.angle[i], self.angle_v[i] = a, v
             self.squash[i], self.squash_v[i] = q, qv
+            self.tip[i], self.tip_v[i] = c, cv
 
     def garland_swing(self, i):
         return self.gswing[i][0] if i < len(self.gswing) else 0.0
@@ -2053,6 +2146,10 @@ class TreeSway:
         """Where a point that belongs to branch i is now (branch turn + tree bend)."""
         b, a = self.branches[i], self.angle[i]
         ax, ay = b["ax"], b["ay"]
+        if b.get("joint") and (x - ax) * b["dir"][0] + (y - ay) * b["dir"][1] > b["jdist"]:
+            jx, jy = b["joint"]                            # outer part: first its own turn at the joint
+            c, s = math.cos(self.tip[i]), math.sin(self.tip[i])
+            x, y = jx + (x - jx) * c - (y - jy) * s, jy + (x - jx) * s + (y - jy) * c
         c, s = math.cos(a), math.sin(a)
         dx = (x - ax) * (1 + self.squash[i])
         return ax + dx * c - (y - ay) * s + self.offset(ay), ay + dx * s + (y - ay) * c
@@ -2109,6 +2206,10 @@ def draw_tree(cr, tree, lights, t, show, sway):
                     cr.rotate(sway.angle[i])
                     cr.scale(1 + sway.squash[i], 1)        # pressed to the trunk / streaming out
                 cr.translate(-ax, -ay)
+                if sprite.get("link") == 1 and i < len(sway.tip):   # outer part bends at the joint
+                    cr.translate(sprite["jx"], sprite["jy"])
+                    cr.rotate(sway.tip[i])
+                    cr.translate(-sprite["jx"], -sprite["jy"])
                 paint_part(cr, sprite)
                 cr.restore()
         elif part["mode"] == "strips":                     # one bitmap, bent strip by strip
