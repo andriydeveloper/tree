@@ -12,7 +12,7 @@ transparent background. Every start grows a different spruce.
 - Garlands hang on branches and sag between them, with several light programs.
 - Falling snow, a semi-transparent WiMo logo flying over the whole scene.
 - The previous fixed cartoon tree is still there: Settings > General > Tree style = classic.
-- Topper, snow, gifts and needles can be switched off in Settings > General; the tree stays the same.
+- Topper, snow, gifts, needles, garlands and ornaments can be switched off in Settings > General; the tree stays the same.
 - A new tree is grown in the background: the old one keeps moving and a loader shows the progress in percent.
 
 ## Start

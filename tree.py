@@ -54,6 +54,8 @@ SHOW_TOPPER = True            # star (topper) on the tree top
 SHOW_SNOW = True              # falling snow and snow on branches
 SHOW_GIFTS = True             # gifts under the tree
 SHOW_NEEDLES = True           # needles (off = bare wood); the tree stays the same
+SHOW_GARLANDS = True          # garlands with bulbs
+SHOW_ORNAMENTS = True         # ornaments (balls, bells, ...) and their glow
 
 BASE_TREE_W, BASE_TREE_H, BASE_GROUND = 180, 258, 244   # default tree area; classic tree coordinates
 BASE_WIDTH, BASE_HEIGHT = 310, 280                         # default window: room for logo and snow
@@ -2237,8 +2239,10 @@ def draw_tree(cr, tree, lights, t, show, sway):
         else:
             paint_part(cr, part)
 
-    draw_garlands(cr, tree["garlands"], t, show, sway)
-    draw_ornaments(cr, tree["ornaments"], lights, sway)
+    if SHOW_GARLANDS:
+        draw_garlands(cr, tree["garlands"], t, show, sway)
+    if SHOW_ORNAMENTS:
+        draw_ornaments(cr, tree["ornaments"], lights, sway)
 
     if not SHOW_TOPPER:
         return
@@ -2901,6 +2905,8 @@ SETTINGS = [
     ("General", "SHOW_SNOW", "Show snow (falling and on branches)", "bool", None, None, None),
     ("General", "SHOW_GIFTS", "Show gifts", "bool", None, None, None),
     ("General", "SHOW_NEEDLES", "Show needles", "bool", None, None, None),
+    ("General", "SHOW_GARLANDS", "Show garlands", "bool", None, None, None),
+    ("General", "SHOW_ORNAMENTS", "Show ornaments", "bool", None, None, None),
     ("General", "LIGHT_CHANGE_S", "Ornament color change every, s", "range", 0.1, 10, 0.1),
     ("General", "LIGHT_FADE_S", "Ornament color crossfade, s", "float", 0.0, 3.0, 0.05),
 
