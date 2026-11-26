@@ -32,7 +32,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QMenu, QPushButton, QScrollArea, QSlider, QSpinBox,
-                               QTabWidget, QVBoxLayout, QWidget, QInputDialog, QMessageBox)
+                               QTabWidget, QVBoxLayout, QWidget)
 
 from translations import LANGUAGES, TEXTS
 
@@ -2762,7 +2762,7 @@ class Scene:
         progress. A newer request cancels the older build. A random tree gets a new seed unless given.
         """
         if seed is None:
-            seed = random.randrange(10 ** 9)
+            seed = random.randrange(10 ** 8)              # 8 digits: short to send, 4 bytes in a code
         self.seed = seed
         print(f"tree seed: {seed}  (Settings > Tree seed = {seed} keeps this tree)", flush=True)
         job = {"progress": 0.0, "tree": None, "failed": False, "geometry": tree_geometry()}
@@ -2908,7 +2908,7 @@ SETTINGS_FILE = os.path.join(HERE, "settings.json")
 SETTINGS = [
     ("General", "LANGUAGE", "Language", "choice", tuple(LANGUAGES), None, None),
     ("General", "TREE_STYLE", "Tree style", "choice", ("random", "classic"), None, None),
-    ("General", "TREE_SEED", "Tree seed (empty = new tree every start)", "seed", None, None, None),
+    ("Share", "TREE_SEED", "Tree seed (empty = new tree every start)", "seed", None, None, None),
     ("General", "TREE_HEIGHT", "Tree height, px (only the tree grows)", "int", 120, 900, 2),
     ("General", "MARGIN", "Distance from screen edges, px", "int", 0, 300, 1),
     ("General", "DRAG_THRESHOLD_PX", "Mouse move that starts a drag, px", "int", 1, 50, 1),
@@ -3071,38 +3071,110 @@ def focused_wheel(cls):
 WheelSlider, WheelSpinBox, WheelDoubleSpinBox = map(focused_wheel, (QSlider, QSpinBox, QDoubleSpinBox))
 
 
-CONFIG_PREFIX = "XTREE1:"
+CODE_PREFIX = "XT1-"
+# Number of every setting in a config code. Append only: a setting keeps its number forever,
+# so codes from older versions still work.
+CODE_IDS = [
+    'TREE_STYLE', 'TREE_SEED', 'TREE_HEIGHT', 'MARGIN', 'DRAG_THRESHOLD_PX', 'MAX_FPS', 'MAX_DT',
+    'SHOW_TOPPER', 'SHOW_SNOW', 'SHOW_GIFTS', 'SHOW_NEEDLES', 'SHOW_GARLANDS', 'SHOW_ORNAMENTS',
+    'LIGHT_CHANGE_S', 'LIGHT_FADE_S', 'SPRUCE_HALF_W', 'SPRUCE_TOP_Y', 'SPRUCE_CROWN_BOTTOM',
+    'SPRUCE_TRUNK_ROOM', 'SPRUCE_ORNAMENT_ZONE', 'SPRUCE_FULLNESS', 'SPRUCE_WHORL_GAP',
+    'SPRUCE_BRANCHES', 'SPRUCE_GAPS', 'NEEDLE_DENSITY', 'NEEDLE_LEN', 'SPRUCE_TRUNK_R',
+    'SPRUCE_LEAN', 'SPRUCE_TRUNK_BEND', 'SPRUCE_STRAIGHT', 'SPRUCE_CONES', 'SPRUCE_SNOW',
+    'SPRUCE_FRESH', 'SPRUCE_ORNAMENTS', 'RANDOM_GIFTS', 'GIFT_COUNT', 'RANDOM_TOPPER',
+    'LOGO_ENABLED', 'LOGO_W', 'LOGO_ALPHA', 'LOGO_DEPTH', 'SCALE_BACK', 'TILT_MAX', 'TILT_FOLLOW',
+    'TILT_VX_SOFT', 'LOOKAHEAD_S', 'EDGE_ON', 'BOB_PX', 'Z_FADE', 'FLIGHT_PATTERN_S',
+    'FLIGHT_BLEND_S', 'FLIGHT_SPEED', 'ORBIT_RX_RANGE', 'ORBIT_RY_RANGE', 'ORBIT_Y_RANGE',
+    'SPEED_RANGE', 'SNOWFLAKES', 'SNOW_SPEED', 'SNOW_SWAY', 'SNOW_LAG_S', 'WIND_MAX', 'WIND_BREEZE',
+    'WIND_CALM_S', 'WIND_GUST_S', 'WIND_RISE_S', 'WIND_FALL_S', 'WIND_DOWN_MAX', 'WIND_KEEP_SIDE',
+    'WIND_TURBULENCE', 'TREE_BEND_PX', 'TREE_IDLE_PX', 'TREE_FREQ', 'TREE_DAMP', 'ORNAMENT_SWING',
+    'ORNAMENT_IDLE', 'BRANCH_BEND', 'BRANCH_FLUTTER', 'BRANCH_SHELTER', 'BRANCH_DAMP',
+    'BRANCH_GAIN', 'GARLAND_PROGRAM_S', 'GARLAND_FADE_S', 'GARLAND_CLICK_FADE_S',
+    'GARLAND_CLICK_FLASH_S', 'GARLAND_MIN_LIGHT', 'GARLAND_SAG',
+]
+SPEC = {name: (kind, lo, hi, step) for _, name, _, kind, lo, hi, step in SETTINGS}
 
 
-def export_code(seed):
+def put_number(out, n):
+    """Whole number >= 0 in 7-bit groups: small numbers take one byte."""
+    while True:
+        out.append((n & 0x7F) | (0x80 if n > 0x7F else 0))
+        n >>= 7
+        if not n:
+            return
+
+
+def take_number(data, pos):
+    n = shift = 0
+    while True:
+        byte = data[pos]
+        pos += 1
+        n |= (byte & 0x7F) << shift
+        shift += 7
+        if not byte & 0x80:
+            return n, pos
+
+
+def export_code(seed, values=None):
     """
-    All settings that differ from the defaults + the tree seed in one line, to send to someone.
-    The language is left out: it is the receiver's own choice.
+    Tree seed + settings that differ from the defaults, as a short line to send to someone.
+    Binary: seed, then (setting number, value as slider steps) pairs, 1 byte checksum; base64.
+    Values are kept to the slider step. The language is the receiver's own choice: left out.
     """
+    values = values or {name: globals()[name] for name in CODE_IDS}
     same = lambda a, b: (list(map(float, a)) == list(map(float, b))) if isinstance(a, tuple) else a == b
-    config = {name: globals()[name] for _, name, *_ in SETTINGS
-              if name != "LANGUAGE" and not same(globals()[name], DEFAULTS[name])}
-    raw = zlib.compress(json.dumps({"seed": seed, "settings": config}, separators=(",", ":")).encode(), 9)
-    return CONFIG_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+    out = bytearray()
+    put_number(out, 0 if seed is None else seed + 1)
+    for i, name in enumerate(CODE_IDS):
+        v = values[name]
+        if same(v, DEFAULTS[name]):
+            continue
+        kind, lo, hi, step = SPEC[name]
+        put_number(out, i)
+        if kind == "bool":
+            put_number(out, int(v))
+        elif kind == "choice":
+            put_number(out, lo.index(v))
+        elif kind == "seed":
+            put_number(out, 0 if v is None else v + 1)
+        else:
+            for x in (v if kind in ("range", "irange") else (v,)):
+                put_number(out, max(0, round((x - lo) / step)))
+    out.append(zlib.crc32(out) & 0xFF)
+    return CODE_PREFIX + base64.urlsafe_b64encode(bytes(out)).decode().rstrip("=")
 
 
 def import_code(text):
-    """(seed, all settings) from a config code; settings missing in the code get their defaults."""
+    """(tree seed, all settings) from a code; settings missing in it get their defaults."""
     text = "".join(text.split())                           # line breaks from a chat or e-mail
-    if not text.startswith(CONFIG_PREFIX):
+    if not text.startswith(CODE_PREFIX):
         raise ValueError("not a config code")
-    body = text[len(CONFIG_PREFIX):]
-    data = json.loads(zlib.decompress(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))))
-    saved, values = data.get("settings", {}), {}
-    for _, name, _, kind, lo, hi, _ in SETTINGS:
-        if name == "LANGUAGE":
-            continue
-        try:
-            values[name] = clean_value(kind, saved[name], lo, hi) if name in saved else DEFAULTS[name]
-        except (TypeError, ValueError):
-            values[name] = DEFAULTS[name]
-    seed = data.get("seed")
-    return (int(seed) if seed is not None else None), values
+    body = text[len(CODE_PREFIX):]
+    data = base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))
+    if len(data) < 2 or zlib.crc32(data[:-1]) & 0xFF != data[-1]:
+        raise ValueError("checksum")                        # a typo or a cut-off code
+    data = data[:-1]
+    values = {name: DEFAULTS[name] for name in CODE_IDS}
+    n, pos = take_number(data, 0)
+    seed = n - 1 if n else None
+    while pos < len(data):
+        i, pos = take_number(data, pos)
+        name = CODE_IDS[i]                                  # IndexError: code from a newer version
+        kind, lo, hi, step = SPEC[name]
+        n, pos = take_number(data, pos)
+        if kind == "bool":
+            v = bool(n)
+        elif kind == "choice":
+            v = lo[n]
+        elif kind == "seed":
+            v = n - 1 if n else None
+        elif kind in ("range", "irange"):
+            m, pos = take_number(data, pos)
+            v = clean_value(kind, (round(lo + n * step, 6), round(lo + m * step, 6)), lo, hi)
+        else:
+            v = clean_value(kind, round(lo + n * step, 6), lo, hi)
+        values[name] = v
+    return seed, values
 
 
 class Slider(QWidget):
@@ -3160,16 +3232,21 @@ class Slider(QWidget):
 class SettingsWindow(QWidget):
     """All settings in tabs. Apply = use now and save to settings.json."""
 
-    def __init__(self, on_apply, on_language=None, on_export=None, on_import=None):
+    def __init__(self, on_apply, on_language=None, owner=None):
         super().__init__(None, Qt.Window | Qt.WindowStaysOnTopHint)
         self.setWindowTitle(f"{tr('Christmas tree settings')} ({__version__})")
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.resize(780, 640)
         self.on_apply = on_apply
         self.on_language = on_language                     # reopens the window in the new language
+        self.owner = owner                                 # tree window: current seed, new tree, import
         self.editors = {}
 
         tabs, grids = QTabWidget(), {}
+        if owner:                                          # seed and config code first, settings rows below
+            grids["Share"] = [None, 0]
+            page, grids["Share"][0], grids["Share"][1] = self.share_tab()
+            tabs.addTab(page, tr("Share"))
         for tab, name, label, kind, lo, hi, step in SETTINGS:
             if tab not in grids:
                 page = QWidget()
@@ -3193,10 +3270,12 @@ class SettingsWindow(QWidget):
             put(globals()[name])
         for grid, row in grids.values():
             grid.setRowStretch(row, 1)                     # rows at the top, not spread out
+        share = [i for i in range(tabs.count()) if tabs.tabText(i) == tr("Share")]
+        if share:                                          # in the middle, not the first tab
+            tabs.tabBar().moveTab(share[0], tabs.count() // 2)
 
         buttons = QHBoxLayout()
-        tools = [("Export config", on_export), ("Import config…", on_import)] if on_export else []
-        for label, handler in (("Reset to defaults", self.on_reset), *tools, (None, None), ("Cancel", self.close),
+        for label, handler in (("Reset to defaults", self.on_reset), (None, None), ("Cancel", self.close),
                                ("Apply", self.on_apply_clicked), ("OK", self.on_ok)):
             if label is None:
                 buttons.addStretch(1)
@@ -3238,6 +3317,69 @@ class SettingsWindow(QWidget):
             return box, lambda: (a.value(), b.value()), lambda v: (a.setValue(v[0]), b.setValue(v[1]))
         w = Slider(kind, lo, hi, step)
         return w, w.value, w.setValue
+
+    def share_tab(self):
+        """Tree seed and config code: copy one to send it, paste one to get the same tree."""
+        page = QWidget()
+        grid = QGridLayout(page)
+        grid.setColumnStretch(1, 1)
+
+        def row(r, label, field, *buttons):
+            grid.addWidget(QLabel(tr(label)), r, 0)
+            grid.addWidget(field, r, 1)
+            for c, (text, handler) in enumerate(buttons, 2):
+                button = QPushButton(tr(text))
+                button.clicked.connect(handler)
+                grid.addWidget(button, r, c)
+
+        self.seed_now = QLineEdit(str(self.owner.scene.seed))
+        self.seed_now.setReadOnly(True)
+        self.seed_new = QLineEdit()
+        self.seed_new.setPlaceholderText("12345678")
+        self.code_out = QLineEdit()
+        self.code_out.setReadOnly(True)
+        self.code_in = QLineEdit()
+        self.code_in.setPlaceholderText(CODE_PREFIX + "…")
+        row(0, "Current tree seed", self.seed_now, ("Copy", lambda: self.copy(self.seed_now.text())))
+        row(1, "Tree from seed", self.seed_new, ("Grow", self.grow_seed))
+        row(2, "Config code (settings + current tree)", self.code_out, ("Export and copy", self.export))
+        row(3, "Import code", self.code_in, ("Import", self.import_))
+        note = QLabel(tr("The language is not part of the code. Settings missing in a code get their defaults."))
+        note.setStyleSheet("color: gray")
+        note.setWordWrap(True)
+        grid.addWidget(note, 4, 0, 1, 3)
+        return page, grid, 5
+
+    def copy(self, text):
+        QApplication.clipboard().setText(text)
+        self.status.setText(tr("Copied to the clipboard."))
+
+    def grow_seed(self):
+        try:
+            seed = int(self.seed_new.text().strip())
+        except ValueError:
+            self.status.setText(tr("A tree seed is a whole number."))
+            return
+        self.owner.scene.grow_tree(seed)
+        self.seed_now.setText(str(seed))
+
+    def export(self):
+        values = self.collect()                            # what is in the window, also before Apply
+        if values is not None:
+            self.code_out.setText(export_code(self.owner.scene.seed, values))
+            self.copy(self.code_out.text())
+
+    def import_(self):
+        try:
+            seed, values = import_code(self.code_in.text())
+        except (ValueError, TypeError, IndexError, KeyError, base64.binascii.Error):
+            self.status.setText(tr("This is not a valid config code."))
+            return
+        self.on_apply({**values, "LANGUAGE": LANGUAGE})
+        if seed is not None:
+            self.owner.scene.grow_tree(seed)               # the same tree as the sender's
+            self.seed_now.setText(str(seed))
+        self.refresh(tr("Config imported and saved."))
 
     def refresh(self, text=""):
         """Show the current values (after an import)."""
@@ -3360,55 +3502,11 @@ class TreeWindow(QWidget):
     def show_menu(self, pos):
         menu = QMenu(self)
         menu.addAction(tr("New random tree"), self.scene.grow_tree)
-        menu.addAction(f"{tr('Copy tree seed')} ({self.scene.seed})", self.copy_seed)
-        menu.addAction(tr("Tree from seed…"), self.tree_from_seed)
-        menu.addSeparator()
-        menu.addAction(tr("Export config"), self.export_config)
-        menu.addAction(tr("Import config…"), self.import_config)
         menu.addSeparator()
         menu.addAction(tr("Settings…"), self.open_settings)
         menu.addSeparator()
         menu.addAction(tr("Close"), QApplication.quit)
         menu.exec(pos)
-
-    def copy_seed(self):
-        QApplication.clipboard().setText(str(self.scene.seed))
-
-    def tree_from_seed(self):
-        clip = QApplication.clipboard().text().strip()
-        text, ok = QInputDialog.getText(self, APP_NAME, tr("Tree seed:"), text=clip if clip.isdigit() else "")
-        if ok and text.strip():
-            try:
-                self.scene.grow_tree(int(text.strip()))
-            except ValueError:
-                QMessageBox.warning(self, APP_NAME, tr("A tree seed is a whole number."))
-
-    def export_config(self):
-        code = export_code(self.scene.seed)
-        QApplication.clipboard().setText(code)
-        box = QMessageBox(QMessageBox.Information, APP_NAME,
-                          tr("Config code (settings + this tree) is copied to the clipboard:"),
-                          parent=self.settings or self)
-        box.setInformativeText(code)
-        box.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        box.exec()
-
-    def import_config(self):
-        clip = QApplication.clipboard().text().strip()
-        text, ok = QInputDialog.getText(self.settings or self, APP_NAME, tr("Config code:"),
-                                        text=clip if clip.startswith(CONFIG_PREFIX) else "")
-        if not ok or not text.strip():
-            return
-        try:
-            seed, values = import_code(text)
-        except (ValueError, TypeError, zlib.error, AttributeError):
-            QMessageBox.warning(self.settings or self, APP_NAME, tr("This is not a valid config code."))
-            return
-        self.apply_settings(values)
-        if seed is not None:
-            self.scene.grow_tree(seed)                     # the same tree as the sender's
-        if self.settings:
-            self.settings.refresh(tr("Config imported and saved."))
 
     def open_settings(self):
         if self.settings:
@@ -3419,7 +3517,7 @@ class TreeWindow(QWidget):
         self.settings.show()
 
     def new_settings(self):
-        window = SettingsWindow(self.apply_settings, self.reopen_settings, self.export_config, self.import_config)
+        window = SettingsWindow(self.apply_settings, self.reopen_settings, self)
         window.destroyed.connect(lambda *_: setattr(self, "settings", None))
         return window
 
@@ -3452,6 +3550,9 @@ class TreeWindow(QWidget):
 
     def tick(self):
         now = time.perf_counter()
+        seed_now = getattr(self.settings, "seed_now", None)
+        if seed_now is not None and seed_now.text() != str(self.scene.seed):
+            seed_now.setText(str(self.scene.seed))         # a new tree while the settings are open
         self.scene.step(min(now - self.last_frame, MAX_DT))
         self.last_frame = now
         self.update()
