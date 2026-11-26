@@ -16,6 +16,13 @@ TEXTS = {
         "to": "до", "from": "від", "random": "випадкове",
         "New random tree": "Нове випадкове дерево", "Settings…": "Налаштування…", "Close": "Закрити",
         "Growing tree": "Росте ялинка",
+        "Copy tree seed": "Копіювати номер дерева", "Tree from seed…": "Дерево за номером…",
+        "Export config": "Експорт налаштувань", "Import config…": "Імпорт налаштувань…",
+        "Tree seed:": "Номер дерева:", "A tree seed is a whole number.": "Номер дерева це ціле число.",
+        "Config code (settings + this tree) is copied to the clipboard:":
+            "Код налаштувань (налаштування + це дерево) скопійовано в буфер обміну:",
+        "Config code:": "Код налаштувань:", "This is not a valid config code.": "Це не код налаштувань.",
+        "Config imported and saved.": "Налаштування імпортовано і збережено.",
         "classic": "класичне",
         # settings
         "Language": "Мова",
@@ -117,6 +124,13 @@ TEXTS = {
         "to": "bis", "from": "von", "random": "zufällig",
         "New random tree": "Neuer zufälliger Baum", "Settings…": "Einstellungen…", "Close": "Schließen",
         "Growing tree": "Baum wächst",
+        "Copy tree seed": "Baumnummer kopieren", "Tree from seed…": "Baum aus Nummer…",
+        "Export config": "Einstellungen exportieren", "Import config…": "Einstellungen importieren…",
+        "Tree seed:": "Baumnummer:", "A tree seed is a whole number.": "Eine Baumnummer ist eine ganze Zahl.",
+        "Config code (settings + this tree) is copied to the clipboard:":
+            "Der Code (Einstellungen + dieser Baum) ist in der Zwischenablage:",
+        "Config code:": "Code:", "This is not a valid config code.": "Das ist kein gültiger Code.",
+        "Config imported and saved.": "Einstellungen importiert und gespeichert.",
         "classic": "klassisch",
         "Language": "Sprache",
         "Tree style": "Baumart",

@@ -44,7 +44,7 @@ To close the tree: right click > Close, or `start.bat --stop` / `./start.sh stop
 | Left click | next garland program |
 | Left button + move | move the tree |
 | Middle click | new random tree |
-| Right click | menu: new random tree, settings, close |
+| Right click | menu: new random tree, copy tree seed, tree from seed, export / import config, settings, close |
 
 ## Settings
 
@@ -53,6 +53,14 @@ the language. Numbers are set with sliders (min and max at the ends) or typed in
 changes a value after a click on it. All values are applied at once and saved to `settings.json` next to the
 app (only the values that differ from the defaults). An update never touches this file.
 `Tree seed` keeps a tree you like: the seed of the current tree is written to `tree.log`.
+
+## Sharing a tree
+
+- **Copy tree seed** puts the number of the current tree into the clipboard. **Tree from seed…**
+  grows that tree again (with the same settings it looks the same).
+- **Export config** makes one line `XTREE1:…` with all changed settings and the current tree seed and
+  copies it. **Import config…** (menu or the settings window) applies such a line: the settings are
+  saved and the same tree grows. The language is not part of the code.
 
 ## Updates
 

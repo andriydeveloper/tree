@@ -14,6 +14,7 @@ Start it with start.bat (Windows) or start.sh (Linux): they update the app and i
 Author: Andrii Havrysh
 """
 import colorsys
+import base64
 import json
 import math
 import os
@@ -22,6 +23,7 @@ import sys
 import threading
 import time
 import traceback
+import zlib
 
 import cairo
 from PySide6.QtCore import QByteArray, QPoint, QRectF, Qt, QTimer
@@ -30,7 +32,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QMenu, QPushButton, QScrollArea, QSlider, QSpinBox,
-                               QTabWidget, QVBoxLayout, QWidget)
+                               QTabWidget, QVBoxLayout, QWidget, QInputDialog, QMessageBox)
 
 from translations import LANGUAGES, TEXTS
 
@@ -3069,6 +3071,40 @@ def focused_wheel(cls):
 WheelSlider, WheelSpinBox, WheelDoubleSpinBox = map(focused_wheel, (QSlider, QSpinBox, QDoubleSpinBox))
 
 
+CONFIG_PREFIX = "XTREE1:"
+
+
+def export_code(seed):
+    """
+    All settings that differ from the defaults + the tree seed in one line, to send to someone.
+    The language is left out: it is the receiver's own choice.
+    """
+    same = lambda a, b: (list(map(float, a)) == list(map(float, b))) if isinstance(a, tuple) else a == b
+    config = {name: globals()[name] for _, name, *_ in SETTINGS
+              if name != "LANGUAGE" and not same(globals()[name], DEFAULTS[name])}
+    raw = zlib.compress(json.dumps({"seed": seed, "settings": config}, separators=(",", ":")).encode(), 9)
+    return CONFIG_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def import_code(text):
+    """(seed, all settings) from a config code; settings missing in the code get their defaults."""
+    text = "".join(text.split())                           # line breaks from a chat or e-mail
+    if not text.startswith(CONFIG_PREFIX):
+        raise ValueError("not a config code")
+    body = text[len(CONFIG_PREFIX):]
+    data = json.loads(zlib.decompress(base64.urlsafe_b64decode(body + "=" * (-len(body) % 4))))
+    saved, values = data.get("settings", {}), {}
+    for _, name, _, kind, lo, hi, _ in SETTINGS:
+        if name == "LANGUAGE":
+            continue
+        try:
+            values[name] = clean_value(kind, saved[name], lo, hi) if name in saved else DEFAULTS[name]
+        except (TypeError, ValueError):
+            values[name] = DEFAULTS[name]
+    seed = data.get("seed")
+    return (int(seed) if seed is not None else None), values
+
+
 class Slider(QWidget):
     """Slider for the mouse (drag or wheel) + number field for exact values, with min and max at the ends."""
 
@@ -3124,7 +3160,7 @@ class Slider(QWidget):
 class SettingsWindow(QWidget):
     """All settings in tabs. Apply = use now and save to settings.json."""
 
-    def __init__(self, on_apply, on_language=None):
+    def __init__(self, on_apply, on_language=None, on_export=None, on_import=None):
         super().__init__(None, Qt.Window | Qt.WindowStaysOnTopHint)
         self.setWindowTitle(f"{tr('Christmas tree settings')} ({__version__})")
         self.setAttribute(Qt.WA_DeleteOnClose)
@@ -3159,7 +3195,8 @@ class SettingsWindow(QWidget):
             grid.setRowStretch(row, 1)                     # rows at the top, not spread out
 
         buttons = QHBoxLayout()
-        for label, handler in (("Reset to defaults", self.on_reset), (None, None), ("Cancel", self.close),
+        tools = [("Export config", on_export), ("Import config…", on_import)] if on_export else []
+        for label, handler in (("Reset to defaults", self.on_reset), *tools, (None, None), ("Cancel", self.close),
                                ("Apply", self.on_apply_clicked), ("OK", self.on_ok)):
             if label is None:
                 buttons.addStretch(1)
@@ -3201,6 +3238,12 @@ class SettingsWindow(QWidget):
             return box, lambda: (a.value(), b.value()), lambda v: (a.setValue(v[0]), b.setValue(v[1]))
         w = Slider(kind, lo, hi, step)
         return w, w.value, w.setValue
+
+    def refresh(self, text=""):
+        """Show the current values (after an import)."""
+        for name, (kind, lo, hi, get, put) in self.editors.items():
+            put(globals()[name])
+        self.status.setText(text)
 
     def on_reset(self):
         for name, (kind, lo, hi, get, put) in self.editors.items():
@@ -3317,28 +3360,75 @@ class TreeWindow(QWidget):
     def show_menu(self, pos):
         menu = QMenu(self)
         menu.addAction(tr("New random tree"), self.scene.grow_tree)
+        menu.addAction(f"{tr('Copy tree seed')} ({self.scene.seed})", self.copy_seed)
+        menu.addAction(tr("Tree from seed…"), self.tree_from_seed)
+        menu.addSeparator()
+        menu.addAction(tr("Export config"), self.export_config)
+        menu.addAction(tr("Import config…"), self.import_config)
         menu.addSeparator()
         menu.addAction(tr("Settings…"), self.open_settings)
         menu.addSeparator()
         menu.addAction(tr("Close"), QApplication.quit)
         menu.exec(pos)
 
+    def copy_seed(self):
+        QApplication.clipboard().setText(str(self.scene.seed))
+
+    def tree_from_seed(self):
+        clip = QApplication.clipboard().text().strip()
+        text, ok = QInputDialog.getText(self, APP_NAME, tr("Tree seed:"), text=clip if clip.isdigit() else "")
+        if ok and text.strip():
+            try:
+                self.scene.grow_tree(int(text.strip()))
+            except ValueError:
+                QMessageBox.warning(self, APP_NAME, tr("A tree seed is a whole number."))
+
+    def export_config(self):
+        code = export_code(self.scene.seed)
+        QApplication.clipboard().setText(code)
+        box = QMessageBox(QMessageBox.Information, APP_NAME,
+                          tr("Config code (settings + this tree) is copied to the clipboard:"),
+                          parent=self.settings or self)
+        box.setInformativeText(code)
+        box.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        box.exec()
+
+    def import_config(self):
+        clip = QApplication.clipboard().text().strip()
+        text, ok = QInputDialog.getText(self.settings or self, APP_NAME, tr("Config code:"),
+                                        text=clip if clip.startswith(CONFIG_PREFIX) else "")
+        if not ok or not text.strip():
+            return
+        try:
+            seed, values = import_code(text)
+        except (ValueError, TypeError, zlib.error, AttributeError):
+            QMessageBox.warning(self.settings or self, APP_NAME, tr("This is not a valid config code."))
+            return
+        self.apply_settings(values)
+        if seed is not None:
+            self.scene.grow_tree(seed)                     # the same tree as the sender's
+        if self.settings:
+            self.settings.refresh(tr("Config imported and saved."))
+
     def open_settings(self):
         if self.settings:
             self.settings.raise_()
             self.settings.activateWindow()
             return
-        self.settings = SettingsWindow(self.apply_settings, self.reopen_settings)
-        self.settings.destroyed.connect(lambda *_: setattr(self, "settings", None))
+        self.settings = self.new_settings()
         self.settings.show()
+
+    def new_settings(self):
+        window = SettingsWindow(self.apply_settings, self.reopen_settings, self.export_config, self.import_config)
+        window.destroyed.connect(lambda *_: setattr(self, "settings", None))
+        return window
 
     def reopen_settings(self, old):
         """After a language change: the same window again, in the new language and at the same place."""
         geometry, tab = old.geometry(), old.findChild(QTabWidget).currentIndex()
         old.destroyed.disconnect()
         old.close()
-        self.settings = SettingsWindow(self.apply_settings, self.reopen_settings)
-        self.settings.destroyed.connect(lambda *_: setattr(self, "settings", None))
+        self.settings = self.new_settings()
         self.settings.setGeometry(geometry)
         self.settings.findChild(QTabWidget).setCurrentIndex(tab)
         self.settings.status.setText(f"{tr('Applied and saved to')} {SETTINGS_FILE}")
