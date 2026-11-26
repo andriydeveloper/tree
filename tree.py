@@ -19,7 +19,9 @@ import math
 import os
 import random
 import sys
+import threading
 import time
+import traceback
 
 import cairo
 from PySide6.QtCore import QByteArray, QPoint, QRectF, Qt, QTimer
@@ -48,6 +50,10 @@ TREE_HEIGHT = 258             # tree height incl. gifts, px; only the tree grows
 RANDOM_GIFTS = True           # False = the classic fixed gifts
 GIFT_COUNT = (3, 6)           # random gifts under the tree
 RANDOM_TOPPER = True          # False = the classic yellow star on top
+SHOW_TOPPER = True            # star (topper) on the tree top
+SHOW_SNOW = True              # falling snow and snow on branches
+SHOW_GIFTS = True             # gifts under the tree
+SHOW_NEEDLES = True           # needles (off = bare wood); the tree stays the same
 
 BASE_TREE_W, BASE_TREE_H, BASE_GROUND = 180, 258, 244   # default tree area; classic tree coordinates
 BASE_WIDTH, BASE_HEIGHT = 310, 280                         # default window: room for logo and snow
@@ -1089,6 +1095,8 @@ def draw_round_gift(cr, g):
 
 def gifts_parts(rng, floor_half):
     """Gifts as two bitmaps: behind the trunk and in front of it (the tree puts its layers between)."""
+    if not SHOW_GIFTS:
+        return [], []
     def part_for(gifts):
         part, cr = tree_part(0, TREE_BASE_Y - 60, TREE_W, TREE_H - TREE_BASE_Y + 60)
         part["mode"] = "static"
@@ -1188,7 +1196,7 @@ def render_static_tree(seed):
             cr.set_source_rgba(0.06 + 0.12 * light, 0.26 + 0.32 * light * rng.uniform(0.6, 1), 0.1 + 0.1 * light, 0.55)
             cr.move_to(x, y)
             cr.line_to(x + side * math.cos(angle) * length, y + math.sin(angle) * length)
-            cr.stroke()
+            cr.stroke() if SHOW_NEEDLES else cr.new_path()   # rng is used either way: same tree
         cr.restore()
 
         for x, y in tips:                                  # a bit of snow on branch tips
@@ -1199,7 +1207,7 @@ def render_static_tree(seed):
                 cr.arc(0, 0, 1, 0, 2 * math.pi)
                 cr.restore()
                 cr.set_source_rgba(1, 1, 1, 0.8)
-                cr.fill()
+                cr.fill() if SHOW_SNOW else cr.new_path()
 
     return [back, *layers]
 
@@ -1258,8 +1266,9 @@ class Spruce:
     Ornament, garland and star positions come from the generated branches. Same seed = same tree.
     """
 
-    def __init__(self, seed):
+    def __init__(self, seed, progress=None):
         self.seed = seed
+        self.progress = progress or (lambda share: None)   # build progress 0..1 for the loader
         self.rng = rng = random.Random(seed)
         self.k = k = tree_k()                               # sizes below are for the default tree
         self.cx = TREE_W / 2
@@ -1362,6 +1371,7 @@ class Spruce:
         rng = self.rng
         y = self.top + rng.uniform(5, 9)
         while y < self.bottom:
+            self.progress(0.12 * (y - self.top) / max(1.0, self.bottom - self.top))   # ~12% of the build
             self.whorls.append(y)
             hy = self.h(y)
             n = rng.randint(*SPRUCE_BRANCHES)
@@ -1374,6 +1384,7 @@ class Spruce:
                 reach = 0.55 + 0.45 * abs(math.cos(az))      # turned branches look shorter, grow them longer
                 length = max(4.0, self.outline(y) * side * rng.uniform(0.85, 1.08) / reach)
                 self.branches.append(self.branch(y, az, length, hy))
+                self.progress(0.12 * (y - self.top) / max(1.0, self.bottom - self.top))   # also lets a frame in
             y += rng.uniform(*SPRUCE_WHORL_GAP) * (1 + 0.8 * hy)
 
         # cones hang under some upper branches on the visible side
@@ -1524,6 +1535,8 @@ class Spruce:
 
     def stroke_needles(self, cr, needles):
         """Needles are grouped by shade, one stroke per group."""
+        if not SHOW_NEEDLES:
+            return
         cr.set_line_width(0.8)
         cr.set_line_cap(cairo.LINE_CAP_BUTT)
         for (level, fresh), segs in needles.items():
@@ -1584,7 +1597,7 @@ class Spruce:
         self.stroke_needles(cr, needles)
 
         cr.set_source_rgba(1, 1, 1, 0.8)
-        for f, x, y, sx, sy in b["snow"]:                    # snow lies on the outer part
+        for f, x, y, sx, sy in (b["snow"] if SHOW_SNOW else ()):   # snow lies on the outer part
             if mine(f):
                 cr.save()
                 cr.translate(x, y)
@@ -1792,7 +1805,7 @@ class Spruce:
                 cr.move_to(x, y - (0.3 if width < 0.4 else 0))
                 cr.line_to(x + side * length, y + drop - (0.3 if width < 0.4 else 0))
                 cr.stroke()
-            if self.snow > 0.2:
+            if self.snow > 0.2 and SHOW_SNOW:
                 cr.set_source_rgba(1, 1, 1, 0.8)
                 cr.arc(x + side * length * 0.6, y - 0.4, 0.8, 0, 2 * math.pi)
                 cr.fill()
@@ -1807,7 +1820,7 @@ class Spruce:
             cr.set_source_rgba(*core, 0.1)
             cr.arc(self.trunk_x(y) + rng.uniform(-w, w), y, rng.uniform(4, 9) * self.k * (0.5 + 0.5 * self.h(y)),
                    0, 2 * math.pi)
-            cr.fill()
+            cr.fill() if SHOW_NEEDLES else cr.new_path()      # dense needles inside; rng used either way
 
     def branch_sprites(self, branches):
         """Every branch in its own small bitmap, so it can swing around its attach point."""
@@ -1827,6 +1840,8 @@ class Spruce:
                 sprite.update(branch=self.branches.index(b), link=link, ax=b["pts"][0][0], ay=b["pts"][0][1],
                               jx=jx, jy=jy, filter=cairo.FILTER_BILINEAR)   # 3x faster than GOOD, same at 1:2
                 sprites.append(sprite)
+            self.sprites_done = getattr(self, "sprites_done", 0) + 1   # branch bitmaps: ~83% of the build
+            self.progress(0.12 + 0.83 * self.sprites_done / max(1, len(self.branches)))
         return {"mode": "branches", "sprites": sprites}
 
     def branch_physics(self):
@@ -1842,6 +1857,7 @@ class Spruce:
         cell = 5 * self.k
         grid, own = {}, []
         for b in self.branches:                              # density map of the crown
+            self.progress(0.95)                              # no new share, only lets a frame in
             mine = {}
             for line in [[p[:2] for p in b["pts"]]] + [t[0] for t in b["twigs"]]:
                 for (xa, ya), (xb, yb) in zip(line, line[1:]):
@@ -1856,6 +1872,7 @@ class Spruce:
         steps = int(2.4 * self.half / cell) + 2
         raw = []
         for b, mine in zip(self.branches, own):              # foliage of others between the branch and the wind
+            self.progress(0.96)
             x, y, _ = self.along(b["pts"], 0.6)
             cx, cy = int(x // cell), int(y // cell)
             sums = []
@@ -1872,12 +1889,13 @@ class Spruce:
 
         out = []
         for b, sums in zip(self.branches, raw):
+            self.progress(0.98)
             length = b["len"] / self.k
             foliage = sum(math.hypot(xb - xa, yb - ya) for t in b["twigs"]
                           for (xa, ya), (xb, yb) in zip(t[0], t[0][1:])) / self.k * b["vigor"]
             outer = sum(math.hypot(xb - xa, yb - ya) for t in b["twigs"] if t[2] >= b["joint"]
                         for (xa, ya), (xb, yb) in zip(t[0], t[0][1:])) / self.k * b["vigor"]
-            snow = 1.35 if b.get("snowy") else 1.0
+            snow = 1.35 if b.get("snowy") and SHOW_SNOW else 1.0
             x, y, _ = self.along(b["pts"], 0.6)
             ax, ay = b["pts"][0][:2]
             reach = math.hypot(x - ax, y - ay) or 1.0
@@ -2019,10 +2037,10 @@ class Spruce:
                 "topper": random_topper(random.Random(self.seed + 2), star[1] + TREE_Y) if RANDOM_TOPPER else None}
 
 
-def build_tree(style, seed):
+def build_tree(style, seed, progress=None):
     if style == "classic":
         return classic_tree(seed)
-    return Spruce(seed).build()
+    return Spruce(seed, progress).build()
 
 
 def paint_part(cr, part):
@@ -2222,6 +2240,8 @@ def draw_tree(cr, tree, lights, t, show, sway):
     draw_garlands(cr, tree["garlands"], t, show, sway)
     draw_ornaments(cr, tree["ornaments"], lights, sway)
 
+    if not SHOW_TOPPER:
+        return
     # topper follows the tree top
     sx, sy = tree["star"]
     cx = sx + sway.offset(sy)
@@ -2707,7 +2727,7 @@ class Wind:
 class Scene:
     """Whole animation state: wind, tree, ornaments, garlands, logo orbit, snow. Independent of the window."""
 
-    def __init__(self):
+    def __init__(self, wait=False):
         self.logo = load_logo()
         self.wind = Wind()
         self.sway = None
@@ -2715,15 +2735,56 @@ class Scene:
         self.snow = Snow()
         self.garland = GarlandShow()
         self.t = 0.0                                   # time since start, seconds
-        self.grow_tree(TREE_SEED)
+        self.tree = None                               # shown tree; None until the first one is built
+        self.job = None                                # tree being built in the background
+        self.frame_lock = threading.Lock()             # held while a frame is stepped and drawn
+        self.grow_tree(TREE_SEED, wait)
 
-    def grow_tree(self, seed=None):
-        """Build the tree; a random one gets a new seed unless one is given."""
+    def grow_tree(self, seed=None, wait=False):
+        """
+        Build the tree in a background thread; the current tree keeps moving and a loader shows the
+        progress. A newer request cancels the older build. A random tree gets a new seed unless given.
+        """
         if seed is None:
             seed = random.randrange(10 ** 9)
         self.seed = seed
         print(f"tree seed: {seed}  (Settings > Tree seed = {seed} keeps this tree)", flush=True)
-        self.tree = build_tree(TREE_STYLE, seed)
+        job = {"progress": 0.0, "tree": None, "failed": False, "geometry": tree_geometry()}
+        self.job = job
+
+        def report(share):
+            # The builder waits here while a frame is drawn; otherwise both threads fight for the
+            # interpreter lock on every cairo call and a frame takes 100+ ms.
+            with self.frame_lock:
+                pass
+            if self.job is not job:
+                raise BuildCancelled
+            job["progress"] = max(job["progress"], min(1.0, share))
+
+        def run():
+            try:
+                job["tree"] = build_tree(TREE_STYLE, seed, report)
+            except BuildCancelled:
+                pass
+            except Exception:                          # keep the old tree, report the error
+                traceback.print_exc()
+                job["failed"] = True
+
+        if wait:
+            run()
+            self.take_tree()
+        else:
+            threading.Thread(target=run, name="tree-build", daemon=True).start()
+
+    def take_tree(self):
+        """Show a finished tree (called from the animation loop)."""
+        job = self.job
+        if job is None or (job["tree"] is None and not job["failed"]):
+            return
+        self.job = None
+        if job["failed"]:
+            return
+        self.tree, self.tree_geometry = job["tree"], job["geometry"]
         old = self.sway
         self.sway = TreeSway(self.tree["ornaments"], self.tree.get("branches", ()), self.tree["garlands"])
         if old:                                        # a new tree keeps swaying in the current wind
@@ -2740,31 +2801,86 @@ class Scene:
         self.grow_tree(TREE_SEED if TREE_SEED is not None else self.seed)
 
     def step(self, dt):
+        with self.frame_lock:
+            self.step_frame(dt)
+
+    def step_frame(self, dt):
         self.t += dt
+        self.take_tree()
         self.wind.step(dt)
-        self.sway.step(dt, self.wind)
         self.orbit.step(dt)
-        self.snow.step(dt, self.wind)
-        self.garland.step(self.t)
-        self.lights.step(self.t)
+        if SHOW_SNOW:
+            self.snow.step(dt, self.wind)
+        if self.tree:
+            self.sway.step(dt, self.wind)
+            self.garland.step(self.t)
+            self.lights.step(self.t)
 
     def draw(self, cr):
-        """Far snow -> logo behind -> tree -> logo in front -> near snow."""
+        with self.frame_lock:
+            self.draw_frame(cr)
+
+    def draw_frame(self, cr):
+        """Far snow -> logo behind -> tree -> logo in front -> near snow -> loader."""
         p = self.orbit.logo_position()
         # Near z = 0 the logo is drawn both behind and in front; alphas add up to LOGO_ALPHA.
         alpha = LOGO_ALPHA if LOGO_ENABLED else 0.0
         a_front = alpha * p["front"]
         a_back = alpha * (1 - p["front"]) / (1 - a_front)
-        self.snow.draw(cr, front=False)
+        if SHOW_SNOW:
+            self.snow.draw(cr, front=False)
         if a_back > 0.002:
             draw_logo(cr, self.logo, p, a_back)
-        cr.save()
-        cr.translate(TREE_X, TREE_Y)
-        draw_tree(cr, self.tree, self.lights.get(self.t), self.t, self.garland, self.sway)
-        cr.restore()
+        if self.tree and self.tree_geometry == tree_geometry():   # an old tree of another size waits hidden
+            cr.save()
+            cr.translate(TREE_X, TREE_Y)
+            draw_tree(cr, self.tree, self.lights.get(self.t), self.t, self.garland, self.sway)
+            cr.restore()
         if a_front > 0.002:
             draw_logo(cr, self.logo, p, a_front)
-        self.snow.draw(cr, front=True)
+        if SHOW_SNOW:
+            self.snow.draw(cr, front=True)
+        if self.job:
+            draw_loader(cr, self.job["progress"])
+
+
+class BuildCancelled(Exception):
+    """A newer tree was requested while this one was being built."""
+
+
+def tree_geometry():
+    return TREE_STYLE, TREE_W, TREE_H, TREE_X, TREE_Y
+
+
+def draw_loader(cr, share):
+    """Small progress pill in the middle of the tree area: "Growing tree 42%" and a bar."""
+    text = f"Growing tree {int(share * 100)}%"
+    w, h = 132, 34
+    x, y = TREE_X + TREE_W / 2 - w / 2, TREE_Y + TREE_H * 0.55 - h / 2
+    r = 9
+    cr.save()
+    cr.new_sub_path()
+    cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+    cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+    cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+    cr.arc(x + r, y + r, r, math.pi, 1.5 * math.pi)
+    cr.close_path()
+    cr.set_source_rgba(0.05, 0.12, 0.08, 0.78)
+    cr.fill()
+    cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+    cr.set_font_size(11)
+    ext = cr.text_extents(text)
+    cr.move_to(x + w / 2 - ext.x_advance / 2, y + 15)
+    cr.set_source_rgba(1, 1, 1, 0.95)
+    cr.show_text(text)
+    bx, by, bw, bh = x + 12, y + 22, w - 24, 4                # progress bar
+    cr.rectangle(bx, by, bw, bh)
+    cr.set_source_rgba(1, 1, 1, 0.2)
+    cr.fill()
+    cr.rectangle(bx, by, bw * share, bh)
+    cr.set_source_rgb(0.95, 0.78, 0.25)
+    cr.fill()
+    cr.restore()
 
 
 # ---------- settings ----------
@@ -2781,6 +2897,10 @@ SETTINGS = [
     ("General", "DRAG_THRESHOLD_PX", "Mouse move that starts a drag, px", "int", 1, 50, 1),
     ("General", "MAX_FPS", "Max frames per second", "int", 10, 240, 1),
     ("General", "MAX_DT", "Longest frame step, s", "float", 0.02, 1.0, 0.01),
+    ("General", "SHOW_TOPPER", "Show topper (star)", "bool", None, None, None),
+    ("General", "SHOW_SNOW", "Show snow (falling and on branches)", "bool", None, None, None),
+    ("General", "SHOW_GIFTS", "Show gifts", "bool", None, None, None),
+    ("General", "SHOW_NEEDLES", "Show needles", "bool", None, None, None),
     ("General", "LIGHT_CHANGE_S", "Ornament color change every, s", "range", 0.1, 10, 0.1),
     ("General", "LIGHT_FADE_S", "Ornament color crossfade, s", "float", 0.0, 3.0, 0.05),
 
