@@ -25,7 +25,7 @@ import traceback
 
 import cairo
 from PySide6.QtCore import QByteArray, QPoint, QRectF, Qt, QTimer
-from PySide6.QtGui import QAction, QGuiApplication, QImage, QPainter
+from PySide6.QtGui import QGuiApplication, QImage, QPainter
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout, QHBoxLayout,
@@ -100,6 +100,7 @@ SPEED_RANGE = (0.5, 1.4)      # orbit speed, rad/s; direction is picked separate
 SNOWFLAKES = 70
 SNOW_SPEED = (13, 40)         # fall speed, px/s
 SNOW_SWAY = 10                # left/right flutter, px/s
+SNOW_LAG_S = 0.3              # how fast a flake takes the wind speed, s
 
 # Wind: calm breeze, from time to time a gust from the left or right,
 # sometimes slanting down. Never from below.
@@ -123,7 +124,8 @@ ORNAMENT_IDLE = 0.04          # ornament idle swing, radians
 BRANCH_BEND = 1.0             # how much single branches bend in the wind (0 = rigid)
 BRANCH_FLUTTER = 0.4          # own turbulent flutter of every branch, 0..1
 BRANCH_SHELTER = 1.0          # how much branches shelter each other from the wind (0 = no shelter)
-BRANCH_DAMP = 0.18            # branch damping ratio (needles damp the swing)
+BRANCH_DAMP = 0.3             # branch damping ratio (needles damp the swing)
+BRANCH_GAIN = 0.07            # branch turn per unit of wind and softness, rad (linear in the wind)
 
 # Random spruce (TREE_STYLE = "random"). Ranges: (min, max), each tree picks its own value.
 SPRUCE_HALF_W = (72, 90)      # crown half width at the bottom, px
@@ -2139,16 +2141,16 @@ class TreeSway:
             soft = BRANCH_BEND * b["sail"] * b["length"] / b["strength"]
             push = lx * -dy + ly * dx                      # wind across the branch
             along = lx * dx + ly * dy                      # < 0: the branch points into the wind
-            target = soft * (0.25 * push * abs(push)
-                             + -dx * (0.2 * max(0.0, -along) - 0.06 * max(0.0, along)))   # lift / droop
-            target += BRANCH_FLUTTER * 0.08 * (abs(wx) + wy) * soft ** 0.5 * math.sin(t * f2 * 1.3 + p1)
-            target = 0.45 * math.tanh(target / 0.45)
-            squash = max(-0.25, min(0.08, soft * (-0.14 * max(0.0, -along) + 0.04 * max(0.0, along))))
+            # linear in the wind: half the wind = half the bend (as the snow drift)
+            target = BRANCH_GAIN * soft * (push + -dx * (0.6 * max(0.0, -along) - 0.2 * max(0.0, along)))
+            target += BRANCH_FLUTTER * 0.25 * BRANCH_GAIN * (abs(wx) + wy) * soft * math.sin(t * f2 * 1.3 + p1)
+            target = 0.3 * math.tanh(target / 0.3)         # only extreme settings reach the limit
+            squash = max(-0.12, min(0.04, BRANCH_GAIN * soft * (-0.5 * max(0.0, -along) + 0.15 * max(0.0, along))))
             a, v, w = self.angle[i], self.angle_v[i], b["freq"]
             q, qv = self.squash[i], self.squash_v[i]
             # outer part: lighter, so it bends further and flutters faster; lags when the inner part moves
-            tip_target = 0.45 * math.tanh(0.9 * target * (0.6 + b.get("outer", 0.5)) / 0.45)
-            tip_target += BRANCH_FLUTTER * 0.06 * (abs(wx) + wy) * soft ** 0.5 * math.sin(t * f1 * 2.1 + p2)
+            tip_target = 0.3 * math.tanh(0.9 * target * (0.6 + b.get("outer", 0.5)) / 0.3)
+            tip_target += BRANCH_FLUTTER * 0.2 * BRANCH_GAIN * (abs(wx) + wy) * soft * math.sin(t * f1 * 2.1 + p2)
             c, cv, tw = self.tip[i], self.tip_v[i], min(14.0, w * 1.8)
             for _ in range(steps):
                 a0 = v
@@ -2630,22 +2632,27 @@ class Snow:
             "near": near,
             "speed": SNOW_SPEED[0] + near * (SNOW_SPEED[1] - SNOW_SPEED[0]),
             "sway": random.uniform(0, 2 * math.pi),  # left/right sway phase
+            "vx": 0.0, "vy": 0.0,                   # own drift; a light flake takes the wind speed fast
             "front": near > 0.6,
         }
 
     def step(self, dt, wind):
         gust = min(1.0, abs(wind.vx) / WIND_MAX)
+        catch = 1 - math.exp(-dt / SNOW_LAG_S)     # flakes are light: they take the wind speed in a moment
         for i, f in enumerate(self.flakes):
-            drift = 0.45 + 0.55 * f["near"]        # near flakes are blown harder (parallax)
+            drift = 0.85 + 0.15 * f["near"]        # far flakes look a bit slower (parallax)
+            f["vx"] += (wind.vx * drift - f["vx"]) * catch
+            f["vy"] += (wind.vy * drift - f["vy"]) * catch
             f["sway"] += dt * (1.3 + 2.0 * gust)   # flutter faster in a gust
-            f["x"] += (wind.vx * drift + math.sin(f["sway"]) * SNOW_SWAY * (1 + gust)) * dt
-            f["y"] += (f["speed"] + wind.vy * drift) * dt
+            f["x"] += (f["vx"] + math.sin(f["sway"]) * SNOW_SWAY * (1 + gust)) * dt
+            f["y"] += (f["speed"] + f["vy"]) * dt
             if f["x"] < -4:                        # blown out of the window: comes back on the other side
                 f["x"] += WIDTH + 8
             elif f["x"] > WIDTH + 4:
                 f["x"] -= WIDTH + 8
             if f["y"] > HEIGHT + 3:
-                self.flakes[i] = self.new_flake(-3)
+                self.flakes[i] = new = self.new_flake(-3)
+                new["vx"], new["vy"] = f["vx"], f["vy"]      # a new flake comes in with the wind
 
     def draw(self, cr, front):
         for f in self.flakes:
@@ -2958,6 +2965,7 @@ SETTINGS = [
     ("Snow", "SNOWFLAKES", "Snowflakes (default window size)", "int", 0, 600, 5),
     ("Snow", "SNOW_SPEED", "Fall speed, px/s", "range", 1, 200, 1),
     ("Snow", "SNOW_SWAY", "Flutter, px/s", "float", 0, 60, 1),
+    ("Snow", "SNOW_LAG_S", "Flake follows the wind in, s", "float", 0.02, 5, 0.02),
 
     ("Wind", "WIND_MAX", "Strongest gust, px/s", "float", 0, 500, 5),
     ("Wind", "WIND_BREEZE", "Breeze between gusts, px/s", "float", 0, 100, 1),
@@ -2979,6 +2987,7 @@ SETTINGS = [
     ("Sway", "BRANCH_FLUTTER", "Branch flutter", "float", 0, 1, 0.05),
     ("Sway", "BRANCH_SHELTER", "Branches shelter each other", "float", 0, 1, 0.05),
     ("Sway", "BRANCH_DAMP", "Branch damping", "float", 0.02, 1.5, 0.01),
+    ("Sway", "BRANCH_GAIN", "Branch turn per wind, rad (linear)", "float", 0, 0.5, 0.005),
 
     ("Garland", "GARLAND_PROGRAM_S", "Program length, s", "float", 1, 120, 1),
     ("Garland", "GARLAND_FADE_S", "Program crossfade, s", "float", 0.0, 10, 0.1),
@@ -3234,23 +3243,10 @@ class TreeWindow(QWidget):
         menu = QMenu(self)
         menu.addAction("New random tree", self.scene.grow_tree)
         menu.addSeparator()
-        logo = QAction("Show logo", menu, checkable=True, checked=LOGO_ENABLED)
-        logo.toggled.connect(self.toggle_logo)
-        menu.addAction(logo)
         menu.addAction("Settings…", self.open_settings)
         menu.addSeparator()
         menu.addAction("Close", QApplication.quit)
         menu.exec(pos)
-
-    def toggle_logo(self, enabled):
-        global LOGO_ENABLED
-        LOGO_ENABLED = enabled
-        try:
-            save_settings()
-        except OSError as e:
-            print(f"settings not saved: {e}", flush=True)
-        if self.settings:                                  # keep an open settings window in sync
-            self.settings.editors["LOGO_ENABLED"][4](enabled)
 
     def open_settings(self):
         if self.settings:

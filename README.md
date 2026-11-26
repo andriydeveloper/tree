@@ -44,7 +44,7 @@ To close the tree: right click > Close, or `start.bat --stop` / `./start.sh stop
 | Left click | next garland program |
 | Left button + move | move the tree |
 | Middle click | new random tree |
-| Right click | menu: new random tree, show logo, settings, close |
+| Right click | menu: new random tree, settings, close |
 
 ## Settings
 
