@@ -13,6 +13,7 @@ Launcher of the Christmas tree. Uses only the standard library, so it runs on a 
   --no-update                        skip the update check
 """
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -27,7 +28,8 @@ __author__ = "Andrii Havrysh"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO = "andriydeveloper/tree"
 BRANCH = "main"
-VERSION_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/VERSION"
+COMMIT_URL = f"https://api.github.com/repos/{REPO}/commits/{BRANCH}"   # always fresh
+VERSION_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/VERSION"   # cached up to 5 minutes
 ZIP_URL = f"https://github.com/{REPO}/archive/refs/heads/{BRANCH}.zip"
 KEEP = {"settings.json", "tree.log", ".venv", ".git", ".launcher.lock"}   # an update never replaces these
 VENV = os.path.join(APP_DIR, ".venv")
@@ -54,6 +56,25 @@ def local_version():
         return "0"
 
 
+def fetch(url, timeout=6):
+    request = urllib.request.Request(url, headers={"User-Agent": "christmas-tree-launcher"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read()
+
+
+def latest():
+    """
+    Version and archive of the newest commit. The commit comes from the GitHub API, so a fresh push
+    is seen at once (raw files are cached for minutes); files of a fixed commit never change.
+    """
+    try:
+        sha = json.loads(fetch(COMMIT_URL))["sha"]
+        version = fetch(f"https://raw.githubusercontent.com/{REPO}/{sha}/VERSION").decode().strip()
+        return version, f"https://github.com/{REPO}/archive/{sha}.zip"
+    except Exception:                                         # API limit (60 an hour) etc.: the cached way
+        return fetch(VERSION_URL).decode().strip(), ZIP_URL
+
+
 def update():
     """True when files were replaced by a newer version from GitHub."""
     if os.path.isdir(os.path.join(APP_DIR, ".git")):         # a git checkout is updated by git
@@ -64,8 +85,7 @@ def update():
         return False
     local = local_version()
     try:
-        with urllib.request.urlopen(VERSION_URL, timeout=4) as response:
-            remote = response.read().decode().strip()
+        remote, zip_url = latest()
     except Exception as e:                                    # offline, GitHub down, no VERSION yet
         log(f"update check skipped ({e.__class__.__name__})")
         return False
@@ -75,7 +95,7 @@ def update():
 
     log(f"updating {local} -> {remote}")
     try:
-        with urllib.request.urlopen(ZIP_URL, timeout=60) as response:
+        with urllib.request.urlopen(zip_url, timeout=60) as response:
             archive = zipfile.ZipFile(io.BytesIO(response.read()))
         names = archive.namelist()
         if any(n.startswith("/") or ".." in n.split("/") for n in names):
